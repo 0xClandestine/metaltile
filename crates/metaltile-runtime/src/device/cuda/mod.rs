@@ -241,6 +241,7 @@ fn size_bucket(len: usize) -> usize {
 /// CUDA device + context. NVIDIA analog of `MetalDevice`.
 pub struct CudaDevice {
     ctx: CUcontext,
+    dev: CUdevice,
     cc_major: i32,
     cc_minor: i32,
     /// Caching device allocator (PyTorch-style). `cuMemAlloc`/`cuMemFree` are
@@ -306,13 +307,32 @@ const CUBLASLT_WORKSPACE_BYTES: usize = 32 * 1024 * 1024;
 // no data race — just an error). Send/Sync are asserted so a higher layer
 // can hold the device in an `Arc`/static to keep the context (and thus
 // persistent device buffers) alive; all GPU submission must stay on the
-// creating thread. The runtime and test harness are single-threaded today;
-// true multi-thread submission would need cuDevicePrimaryCtxRetain +
-// cuCtxSetCurrent guards at every entry point.
+// The device holds the refcounted PRIMARY context; `ensure_current` binds it
+// to the calling thread (cuCtxSetCurrent, cached per thread) at every public
+// entry point, so cross-thread use is sound.
 unsafe impl Send for CudaDevice {}
 unsafe impl Sync for CudaDevice {}
 
+thread_local! {
+    /// The ctx this thread last bound via `ensure_current` — skip the driver
+    /// call when it's already current (the per-call cost would otherwise be
+    /// paid ~400×/token on the decode path).
+    static CURRENT_CTX: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl CudaDevice {
+    /// Bind this device's primary context to the calling thread (no-op when
+    /// already bound). Must run at the top of every public entry point that
+    /// touches the driver.
+    fn ensure_current(&self) {
+        CURRENT_CTX.with(|c| {
+            if c.get() != self.ctx as usize {
+                unsafe { cuCtxSetCurrent(self.ctx) };
+                c.set(self.ctx as usize);
+            }
+        });
+    }
+
     /// Initialize CUDA, grab device 0, create a context. Returns `Ok(None)`
     /// if no CUDA device is present (mirrors `MetalDevice::create`).
     pub fn create() -> Result<Option<Self>, MetalTileError> {
@@ -334,12 +354,18 @@ impl CudaDevice {
                 cuDeviceGetAttribute(&mut minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, dev),
                 "cuDeviceGetAttribute(cc_minor)",
             )?;
+            // Primary context (shared, refcounted) instead of cuCtxCreate:
+            // a created context is current ONLY on the creating thread,
+            // which made the Send/Sync impls a documented lie. The primary
+            // ctx + a per-thread cuCtxSetCurrent guard (ensure_current)
+            // makes cross-thread use sound.
             let mut ctx: CUcontext = ptr::null_mut();
-            cu_check(cuCtxCreate_v2(&mut ctx, 0, dev), "cuCtxCreate")?;
+            cu_check(cuDevicePrimaryCtxRetain(&mut ctx, dev), "cuDevicePrimaryCtxRetain")?;
+            cu_check(cuCtxSetCurrent(ctx), "cuCtxSetCurrent")?;
             let mut stream: CUstream = ptr::null_mut();
             let sres = cuStreamCreate(&mut stream, CU_STREAM_NON_BLOCKING);
             if sres != CUDA_SUCCESS {
-                cuCtxDestroy_v2(ctx);
+                cuDevicePrimaryCtxRelease_v2(dev);
                 cu_check(sres, "cuStreamCreate")?;
             }
             // Caching allocator DEFAULT-ON (alloc()/Drop route through it): nsys
@@ -348,6 +374,7 @@ impl CudaDevice {
             let pool_enabled = std::env::var("METALTILE_POOL_ALLOC_OFF").is_err();
             Ok(Some(CudaDevice {
                 ctx,
+                dev,
                 cc_major: major,
                 cc_minor: minor,
                 pool: Mutex::new(HashMap::new()),
@@ -451,6 +478,7 @@ impl CudaDevice {
         k: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         // DETERMINISTIC by default: route through cublasLt with split-K reductions
         // forbidden (REDUCTION_SCHEME_NONE). The legacy cublasGemmEx heuristic
         // picks split-K atomic-accumulate kernels for some MoE-prefill shapes →
@@ -539,6 +567,7 @@ impl CudaDevice {
         n: usize,
         k: usize,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         #[cfg(have_cutlass)]
         {
             unsafe extern "C" {
@@ -605,6 +634,7 @@ impl CudaDevice {
         k: usize,
         ab_dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         self.gemm_cublaslt(x, w, out, m, n, k, ab_dtype, metaltile_core::DType::F32)
     }
 
@@ -630,6 +660,7 @@ impl CudaDevice {
         dtype: metaltile_core::DType,
         out_dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         let (lt, workspace) = self.cublaslt_ctx()?;
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
@@ -781,6 +812,7 @@ impl CudaDevice {
         batch_count: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         // DETERMINISTIC by default via cublasLt (split-K reductions forbidden);
         // see gemm_cublas. METALTILE_GEMM_NONDET=1 → legacy nondeterministic path.
         if std::env::var("METALTILE_GEMM_NONDET").ok().as_deref() != Some("1") {
@@ -864,6 +896,7 @@ impl CudaDevice {
         batch_count: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         let (lt, workspace) = self.cublaslt_ctx()?;
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
@@ -1022,6 +1055,7 @@ impl CudaDevice {
         k: usize,            // shared input dim
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         let group_count = x_ptrs.len();
         assert_eq!(w_ptrs.len(), group_count);
         assert_eq!(out_ptrs.len(), group_count);
@@ -1162,6 +1196,7 @@ impl CudaDevice {
         k: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         let batch_count = x_ptrs.len();
         assert_eq!(w_ptrs.len(), batch_count);
         assert_eq!(out_ptrs.len(), batch_count);
@@ -1252,6 +1287,7 @@ impl CudaDevice {
     /// driver JIT. Targets the device's own virtual arch
     /// (`compute_<major><minor>`); the driver JITs PTX to the live GPU.
     pub fn compile(&self, src: &str, prog_name: &str) -> Result<CudaModule, MetalTileError> {
+        self.ensure_current();
         let csrc = CString::new(src).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
         let cname =
             CString::new(prog_name).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
@@ -1412,6 +1448,7 @@ impl CudaDevice {
 
     /// Allocate `len` bytes of device memory.
     pub fn alloc(&self, len: usize) -> Result<DeviceBuffer<'_>, MetalTileError> {
+        self.ensure_current();
         if len == 0 {
             return Ok(DeviceBuffer { ptr: 0, len: 0, _dev: self });
         }
@@ -1426,6 +1463,7 @@ impl CudaDevice {
 
     /// Allocate + upload host bytes in one shot.
     pub fn upload(&self, data: &[u8]) -> Result<DeviceBuffer<'_>, MetalTileError> {
+        self.ensure_current();
         let buf = self.alloc(data.len())?;
         if !data.is_empty() {
             // Enqueue on self.stream (NOT the null stream). Kernels ride self.stream
@@ -1453,6 +1491,7 @@ impl CudaDevice {
 
     /// Copy device memory back into a host buffer.
     pub fn download(&self, buf: &DeviceBuffer, out: &mut [u8]) -> Result<(), MetalTileError> {
+        self.ensure_current();
         let n = out.len().min(buf.len);
         if n == 0 {
             return Ok(());
@@ -1475,6 +1514,7 @@ impl CudaDevice {
     ///
     /// [`free_raw`]: CudaDevice::free_raw
     pub fn alloc_raw(&self, len: usize) -> Result<CUdeviceptr, MetalTileError> {
+        self.ensure_current();
         if len == 0 {
             return Ok(0);
         }
@@ -1505,6 +1545,7 @@ impl CudaDevice {
     /// Free a pointer returned by [`alloc_raw`]. No-op on a null pointer.
     /// Eagerly releases to the driver (use [`free_raw_pooled`] on the hot path).
     pub fn free_raw(&self, ptr: CUdeviceptr) {
+        self.ensure_current();
         // Never cuMemFree while a CUDA graph is capturing (the graph captured this
         // pointer → replay would read freed memory). Retain it (leaks for the
         // transient capture; acceptable vs a corrupt graph).
@@ -1521,6 +1562,7 @@ impl CudaDevice {
     /// pool disabled (`METALTILE_POOL_ALLOC_OFF`) this releases to the driver
     /// directly (except mid-graph-capture, where the pointer must stay live).
     pub fn free_raw_pooled(&self, ptr: CUdeviceptr, len: usize) {
+        self.ensure_current();
         if ptr == 0 {
             return;
         }
@@ -1560,6 +1602,7 @@ impl CudaDevice {
     /// without a host-blocking GPU drain. The pinned buffer is reclaimed on the
     /// next `synchronize`/`download` (by then the copy has completed).
     pub fn htod(&self, ptr: CUdeviceptr, bytes: &[u8]) -> Result<(), MetalTileError> {
+        self.ensure_current();
         if bytes.is_empty() {
             return Ok(());
         }
@@ -1615,6 +1658,7 @@ impl CudaDevice {
 
     /// Copy device memory back to a host slice (device→host).
     pub fn dtoh(&self, ptr: CUdeviceptr, out: &mut [u8]) -> Result<(), MetalTileError> {
+        self.ensure_current();
         if out.is_empty() {
             return Ok(());
         }
@@ -1638,6 +1682,7 @@ impl CudaDevice {
         block_threads: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         self.launch(func, [grid_blocks, 1, 1], [block_threads, 1, 1], 0, args)
     }
 
@@ -1652,6 +1697,7 @@ impl CudaDevice {
         shared_bytes: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         // Opt into the requested dynamic shared size (no-op below the default
         // cap, required above 48KB). Fails *before* launch on archs that cap
         // dynamic smem at 48KB (pre-Volta) instead of a cryptic launch error.
@@ -1690,6 +1736,7 @@ impl CudaDevice {
         shared_bytes: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         ensure_dynamic_smem(func.func, shared_bytes)?;
         cu_check(
             unsafe {
@@ -1724,6 +1771,7 @@ impl CudaDevice {
         shared_bytes: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), MetalTileError> {
+        self.ensure_current();
         ensure_dynamic_smem(func.func, shared_bytes)?;
         cu_check(
             unsafe {
@@ -1753,6 +1801,7 @@ impl CudaDevice {
     /// megakernel). Caller must run a NO-host-sync (all-device) sequence, then
     /// `end_capture`. THREAD_LOCAL mode scopes capture to this thread's stream.
     pub fn begin_capture(&self) -> Result<(), MetalTileError> {
+        self.ensure_current();
         self.capturing.store(true, std::sync::atomic::Ordering::SeqCst);
         cu_check(
             unsafe { cuStreamBeginCapture_v2(self.stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL) },
@@ -1762,6 +1811,7 @@ impl CudaDevice {
 
     /// Finish capture → instantiate an executable graph. Replay with `graph_launch`.
     pub fn end_capture(&self) -> Result<CUgraphExec, MetalTileError> {
+        self.ensure_current();
         let mut graph: CUgraph = ptr::null_mut();
         let res =
             cu_check(unsafe { cuStreamEndCapture(self.stream, &mut graph) }, "cuStreamEndCapture");
@@ -1785,6 +1835,7 @@ impl CudaDevice {
     /// `exec` must be a live handle returned by [`Self::end_capture`].
     #[allow(clippy::not_unsafe_ptr_arg_deref)] // opaque driver handle, not dereferenced host-side
     pub fn graph_launch(&self, exec: CUgraphExec) -> Result<(), MetalTileError> {
+        self.ensure_current();
         cu_check(unsafe { cuGraphLaunch(exec, self.stream) }, "cuGraphLaunch")?;
         self.synchronize()
     }
@@ -1799,6 +1850,7 @@ impl CudaDevice {
     /// `exec` must be a live handle returned by [`Self::end_capture`].
     #[allow(clippy::not_unsafe_ptr_arg_deref)] // opaque driver handle, not dereferenced host-side
     pub fn graph_launch_batch(&self, exec: CUgraphExec, n: usize) -> Result<(), MetalTileError> {
+        self.ensure_current();
         for _ in 0..n {
             cu_check(unsafe { cuGraphLaunch(exec, self.stream) }, "cuGraphLaunch(batch)")?;
         }
@@ -1977,6 +2029,7 @@ impl CudaDevice {
         grid: [u32; 3],
         block: [u32; 3],
     ) -> Result<BTreeMap<String, Vec<u8>>, MetalTileError> {
+        self.ensure_current();
         let prep = self.prepare(kernel, buffers, block)?;
 
         // Launch (with dynamic shared memory).
@@ -2015,6 +2068,7 @@ impl CudaDevice {
         warmup: u32,
         iters: u32,
     ) -> Result<Vec<f64>, MetalTileError> {
+        self.ensure_current();
         let prep = self.prepare(kernel, buffers, block)?;
         let mut args = prep.args();
 
@@ -2077,6 +2131,7 @@ impl CudaDevice {
     }
 
     pub fn synchronize(&self) -> Result<(), MetalTileError> {
+        self.ensure_current();
         cu_check(unsafe { cuStreamSynchronize(self.stream) }, "cuStreamSynchronize")?;
         self.reclaim_pinned();
         Ok(())
@@ -2135,7 +2190,10 @@ impl Drop for CudaDevice {
             unsafe { cuStreamDestroy_v2(self.stream) };
         }
         if !self.ctx.is_null() {
-            unsafe { cuCtxDestroy_v2(self.ctx) };
+            // Primary context: release the refcount taken in create() —
+            // destroying it would tear the context down under any other
+            // holder in the process.
+            unsafe { cuDevicePrimaryCtxRelease_v2(self.dev) };
         }
     }
 }

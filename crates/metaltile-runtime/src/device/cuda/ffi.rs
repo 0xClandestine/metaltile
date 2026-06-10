@@ -43,7 +43,12 @@ unsafe extern "C" {
     pub fn cuInit(flags: c_uint) -> CUresult;
     pub fn cuDeviceGet(device: *mut CUdevice, ordinal: c_int) -> CUresult;
     pub fn cuDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: CUdevice) -> CUresult;
+    #[allow(dead_code)]
     pub fn cuCtxCreate_v2(pctx: *mut CUcontext, flags: c_uint, dev: CUdevice) -> CUresult;
+    pub fn cuDevicePrimaryCtxRetain(pctx: *mut CUcontext, dev: CUdevice) -> CUresult;
+    pub fn cuDevicePrimaryCtxRelease_v2(dev: CUdevice) -> CUresult;
+    pub fn cuCtxSetCurrent(ctx: CUcontext) -> CUresult;
+    #[allow(dead_code)]
     pub fn cuCtxDestroy_v2(ctx: CUcontext) -> CUresult;
     #[allow(dead_code)]
     pub fn cuCtxSynchronize() -> CUresult;
