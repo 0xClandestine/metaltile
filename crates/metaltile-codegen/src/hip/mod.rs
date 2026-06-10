@@ -2,23 +2,34 @@
 //! SPDX-License-Identifier: Apache-2.0
 //! HIP / ROCm codegen backend (`AMD_BACKEND_SPEC.md`).
 //!
-//! HIP is a CUDA-portable C++ dialect: at the **kernel** level, `__global__`,
+//! There is **one kernel-source layer** for the C++-dialect GPU targets, not
+//! a CUDA original with a HIP copy. At the kernel level, `__global__`,
 //! `blockIdx`/`threadIdx`/`blockDim`, `__shared__`, `__syncthreads`,
 //! `__syncwarp`, `__shfl_*_sync`, atomics, and the precise single-precision
 //! math intrinsics (`expf`, `exp2f`, `rsqrtf`, `__frcp_rn`, `fmaxf`/`fminf`,
-//! `fmaf`) are **bit-identical** to the CUDA emitter's output. The only deltas
-//! are:
+//! `fmaf`) are a **shared vocabulary** that NVIDIA and AMD define
+//! identically. The op-walker (hosted in [`crate::cuda`]) emits that shared
+//! source once; each vendor then gets a thin dialect lowering:
 //!
-//! 1. Header includes — `cuda_fp16.h` / `cuda_bf16.h` → `hip/hip_fp16.h` /
-//!    `hip/hip_bf16.h`.
-//! 2. The bf16 type name — `__nv_bfloat16` → `__hip_bfloat16`.
-//! 3. The `MT_INF` literal — `__int_as_float` is in HIP, but reusing the same
-//!    expression keeps the preamble identical.
+//! * **CUDA** — the identity (the shared spelling is already valid CUDA).
+//! * **HIP** — [`to_hip_dialect`]: header includes (`cuda_fp16.h` →
+//!   `hip/hip_fp16.h`, `cuda_bf16.h` → `hip/hip_bf16.h`), the bf16 type name
+//!   (`__nv_bfloat16` → `__hip_bfloat16`), 64-bit shuffle-mask containers,
+//!   and the missing bf16 `__ldg` shim.
 //!
-//! So this generator **does not fork the CUDA op-walker**. It delegates to
-//! [`crate::cuda::CudaGenerator`] for the full kernel emission, then runs a
-//! small textual transform (`cuda_to_hip`) over the result. That keeps the
-//! invariants that took the CUDA backend 4164/4164 passes to establish.
+//! Sharing the one op-walker (rather than forking it) keeps the invariants
+//! that took 4164/4164 corpus passes to establish: a numerics fix lands once
+//! and both vendors inherit it.
+//!
+//! TODO(follow-up, post-#274/#275): the shared layer still *lives in* the
+//! `cuda` module and the lowering is textual, which makes CUDA read as the
+//! first-class target. The structural fix is to extract the op-walker into a
+//! vendor-neutral `gpu_cpp` emitter module that `CudaGenerator` and
+//! `HipGenerator` both wrap with their dialect lowering (CUDA's being the
+//! identity), with the lowering applied to the emitter's structured
+//! preamble/body parts instead of post-processing a flat string. Deferred
+//! here because it churns the hardware-validated CUDA emitter this stack is
+//! built on; behavior-preserving naming/docs land now.
 //!
 //! **Wavefront width:** the default profile is wave32 (RDNA1+; gfx10/11/12 —
 //! including the RX 9070 XT / gfx1201). CDNA wave64 needs the broader 64-bit
@@ -34,15 +45,15 @@ use crate::{
     cuda::CudaGenerator,
 };
 
-/// HIP code generator. Thin wrapper around [`CudaGenerator`] that post-
-/// processes the emitted CUDA source into HIP-flavored C++.
+/// HIP code generator: the shared op-walker plus the HIP dialect lowering
+/// ([`to_hip_dialect`]).
 #[derive(Debug, Clone)]
 pub struct HipGenerator {
     profile: TargetProfile,
-    /// We construct a CUDA-profiled inner generator (lane_width 32, shared
-    /// idioms) so the **op-walker** uses CUDA spellings the transform
-    /// recognises; the *outer* `profile` is what callers see via the
-    /// `CodegenBackend` trait.
+    /// The shared op-walker (hosted by [`CudaGenerator`] today — see the
+    /// module-level TODO). Constructed with a CUDA-target profile so it
+    /// emits the shared spellings the lowering recognises; the *outer*
+    /// `profile` is what callers see via the `CodegenBackend` trait.
     inner: CudaGenerator,
 }
 
@@ -54,15 +65,14 @@ impl HipGenerator {
     pub fn new() -> Self { Self::with_profile(TargetProfile::hip()) }
 
     /// Pin to a specific HIP profile. For [`TargetProfile::hip_wave64`]
-    /// (CDNA — MI200/MI300/MI350), we *also* swap the inner CUDA
-    /// generator's profile to a lane_width=64 CUDA variant so its
-    /// reduction tree sizes the shared scratch to 64 warps and emits the
-    /// right per-warp boundaries. The textual transform then widens the
-    /// shuffle masks to 64 bits.
+    /// (CDNA — MI200/MI300/MI350), we *also* give the shared op-walker a
+    /// lane_width=64 profile so its reduction tree sizes the shared
+    /// scratch to 64 warps and emits the right per-warp boundaries. The
+    /// dialect lowering then widens the shuffle masks to 64 bits.
     ///
-    /// The inner CudaGenerator profile inherits `mma` and `lane_width`
-    /// from the HIP profile — that's how `SoftwareLocalC` reaches the
-    /// CoopTile op-walker.
+    /// The inner op-walker profile inherits `mma` and `lane_width` from
+    /// the HIP profile — that's how `SoftwareLocalC` reaches the CoopTile
+    /// op-walker.
     pub fn with_profile(profile: TargetProfile) -> Self {
         debug_assert_eq!(profile.target, Target::Hip);
         let mut inner_profile = TargetProfile::cuda();
@@ -76,9 +86,9 @@ impl HipGenerator {
         Self { profile, inner: CudaGenerator::with_profile(inner_profile) }
     }
 
-    /// Dynamic shared-memory bytes for a launch, forwarded to the inner
-    /// CUDA generator (the layout is identical — `__shared__` decls are
-    /// pure C and survive `cuda_to_hip` unchanged).
+    /// Dynamic shared-memory bytes for a launch, forwarded to the shared
+    /// op-walker (the layout is identical — `__shared__` decls are pure C
+    /// and survive [`to_hip_dialect`] unchanged).
     pub fn shared_bytes(&self, kernel: &Kernel, block_x: u32) -> usize {
         self.inner.shared_bytes(kernel, block_x)
     }
@@ -90,10 +100,10 @@ impl CodegenBackend for HipGenerator {
     fn profile(&self) -> &TargetProfile { &self.profile }
 
     fn generate(&self, kernel: &Kernel) -> Result<String> {
-        let cuda_src = self.inner.generate(kernel)?;
-        let src = cuda_to_hip(&cuda_src);
+        let shared_src = self.inner.generate(kernel)?;
+        let src = to_hip_dialect(&shared_src);
         // Wave64 (CDNA) — widen any 32-bit shuffle masks to 64-bit
-        // ALL-LANES-ACTIVE. The wave32 transform already swapped
+        // ALL-LANES-ACTIVE. The wave32 lowering already swapped
         // `0xffffffffu` to `0xffffffffull` (the low-32 mask in a 64-bit
         // container), but on wave64 the upper 32 lanes are real, so the
         // mask needs all-1s.
@@ -105,15 +115,15 @@ impl CodegenBackend for HipGenerator {
     }
 }
 
-/// Textual CUDA → HIP transform. Surgical: only touches the lines that
-/// genuinely differ between the dialects. The kernel body itself is
-/// untouched because the CUDA syntax HIP recognises 1:1.
+/// The HIP dialect lowering over the shared kernel source. Surgical: only
+/// touches the lines where the vendor dialects genuinely differ. The kernel
+/// body itself is untouched because both dialects define it identically.
 ///
-/// The transforms are **conservative** — each only matches text the CUDA
-/// emitter actually produces, so unrelated code (e.g. user-supplied
+/// The rewrites are **conservative** — each only matches text the shared
+/// op-walker actually produces, so unrelated code (e.g. user-supplied
 /// preambles in future inline kernels) is not silently rewritten.
-pub fn cuda_to_hip(cuda_src: &str) -> String {
-    let mut s = cuda_src.to_string();
+pub fn to_hip_dialect(shared_src: &str) -> String {
+    let mut s = shared_src.to_string();
 
     // Header includes. hipRTC auto-includes `hip/hip_runtime.h`, so the
     // `__global__`/`__shared__` keywords resolve without an explicit include
@@ -263,19 +273,19 @@ mod tests {
     }
 
     #[test]
-    fn cuda_to_hip_is_idempotent() {
-        // Running the transform twice produces the same output (each rule
-        // only fires against the CUDA spellings, not the HIP ones). Use the
-        // reduction kernel: it emits `__shfl_down_sync` masks, the rule most
-        // prone to matching its own output (`0xffffffffull` contains
+    fn hip_dialect_lowering_is_idempotent() {
+        // Running the lowering twice produces the same output (each rule
+        // only fires against the shared spellings, not the HIP ones). Use
+        // the reduction kernel: it emits `__shfl_down_sync` masks, the rule
+        // most prone to matching its own output (`0xffffffffull` contains
         // `0xffffffffu`).
         let src = HipGenerator::new().generate(&row_reduce_sum_ir()).unwrap();
         assert!(src.contains("0xffffffffull"), "expected widened shuffle mask");
-        let twice = cuda_to_hip(&src);
+        let twice = to_hip_dialect(&src);
         assert_eq!(src, twice);
         // And the simple elementwise kernel stays covered.
         let src = HipGenerator::new().generate(&vector_add_ir()).unwrap();
-        assert_eq!(src, cuda_to_hip(&src));
+        assert_eq!(src, to_hip_dialect(&src));
     }
 
     /// Build a simple reduction-mode kernel so the emitted source contains
