@@ -206,11 +206,10 @@ impl HipDevice {
             // else: gfx1100 RDNA 3, gfx942 MI300, gfx950 MI350.
             let gfx = std::env::var("METALTILE_HIP_GFX")
                 .unwrap_or_else(|_| "gfx1201".to_string());
-            // Derive wave size from gfx family. The CUDA-style attribute
-            // query (HIP_DEVICE_ATTRIBUTE_WARP_SIZE) is unreliable on Windows
-            // ROCm 7.x — the enum index drifts between releases — so we use
-            // the canonical mapping instead. gfx9xx (CDNA) is wave64;
-            // gfx10/11/12 (RDNA) is wave32.
+            // Derive wave size from gfx family rather than querying the
+            // warp-size attribute — one less FFI round trip and the gfx
+            // string is already authoritative here. gfx9xx (CDNA) is
+            // wave64; gfx10/11/12 (RDNA) is wave32.
             let warp_size: i32 = if gfx.starts_with("gfx9") { 64 } else { 32 };
 
             // Query the largest dynamic LDS a kernel can opt into. Used
@@ -329,24 +328,36 @@ impl HipDevice {
             )));
         }
 
-        // Fetch the compiled code object (ELF for AMDGPU).
+        // Fetch the compiled code object (ELF for AMDGPU). Destroy the
+        // program before propagating any fetch error — `?` inside the block
+        // would leak it.
         let code = unsafe {
-            let mut sz: usize = 0;
-            hiprtc_check(hiprtcGetCodeSize(prog, &mut sz), "hiprtcGetCodeSize")?;
-            let mut buf = vec![0u8; sz];
-            hiprtc_check(
-                hiprtcGetCode(prog, buf.as_mut_ptr() as *mut c_char),
-                "hiprtcGetCode",
-            )?;
-            buf
+            let fetch = (|| {
+                let mut sz: usize = 0;
+                hiprtc_check(hiprtcGetCodeSize(prog, &mut sz), "hiprtcGetCodeSize")?;
+                let mut buf = vec![0u8; sz];
+                hiprtc_check(
+                    hiprtcGetCode(prog, buf.as_mut_ptr() as *mut c_char),
+                    "hiprtcGetCode",
+                )?;
+                Ok::<_, MetalTileError>(buf)
+            })();
+            hiprtcDestroyProgram(&mut prog);
+            fetch?
         };
-        unsafe { hiprtcDestroyProgram(&mut prog) };
 
         let mut module: hipModule_t = ptr::null_mut();
         hip_check(
             unsafe { hipModuleLoadData(&mut module, code.as_ptr() as *const c_void) },
             "hipModuleLoadData",
-        )?;
+        )
+        .map_err(|e| {
+            MetalTileError::Compilation(format!(
+                "{e} — code object was built for `{}`; if the GPU is a \
+                 different arch set METALTILE_HIP_GFX (e.g. gfx1100, gfx942)",
+                self.gfx
+            ))
+        })?;
         Ok(HipModuleHandle { module })
     }
 

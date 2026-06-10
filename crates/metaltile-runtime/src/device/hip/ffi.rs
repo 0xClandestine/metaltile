@@ -31,15 +31,17 @@ pub const HIP_SUCCESS: hipError_t = 0;
 pub const HIPRTC_SUCCESS: hiprtcResult = 0;
 
 // `hipDeviceAttribute_t` values used here. Mirrored from
-// `<hip/hip_runtime_api.h>` — they're stable across ROCm 5/6/7.
+// `<hip/hip_runtime_api.h>` (post-ROCm-4.5 renumbering) — stable across
+// ROCm 5/6/7 at THESE values. Note the enum is NOT CUDA-ordered: Minor is
+// 61 (not Major+1), WarpSize is 87.
 pub const HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 23;
-pub const HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 24;
-pub const HIP_DEVICE_ATTRIBUTE_WARP_SIZE: c_int = 30;
-/// `hipDeviceAttributeMaxSharedMemoryPerBlockOptin` — the largest dynamic
+pub const HIP_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 61;
+pub const HIP_DEVICE_ATTRIBUTE_WARP_SIZE: c_int = 87;
+/// `hipDeviceAttributeSharedMemPerBlockOptin` — the largest dynamic
 /// LDS a kernel can request via `hipFuncSetAttribute`. On RDNA 4 the
 /// per-workgroup default is 64KB; the opt-in can extend into the per-WGP
 /// LDS (up to 160KB on gfx1201). On CDNA it's lower per the silicon.
-pub const HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN: c_int = 45;
+pub const HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN: c_int = 75;
 
 // Function-attribute index for the dynamic shared-memory opt-in.
 // HIP's `hipFuncAttributeMaxDynamicSharedMemorySize == 8`; identical to CUDA.

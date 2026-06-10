@@ -370,9 +370,10 @@ impl GlslGenerator {
         // compounds to ~3 ULPs and exceeds tight absolute tolerances.
         // `mt_subgroup_add` linearly broadcasts and accumulates so the
         // result matches Rust's `iter().sum()` bit-exactly.
+        let lw = self.profile.lane_width;
         writeln!(out, "float mt_subgroup_add(float v) {{").ok();
         writeln!(out, "    float s = 0.0;").ok();
-        writeln!(out, "    for (uint i = 0u; i < 32u; i++) {{").ok();
+        writeln!(out, "    for (uint i = 0u; i < {lw}u; i++) {{").ok();
         writeln!(out, "        s += subgroupShuffle(v, i);").ok();
         writeln!(out, "    }}").ok();
         writeln!(out, "    return s;").ok();
@@ -747,6 +748,11 @@ impl GlslGenerator {
         // subgroup-id is only used at op level for subgroup intrinsics
         // (`subgroupAdd`, etc., which operate on the actual hardware
         // subgroup regardless of what we call `simd_*`).
+        // Deliberately gl_LocalInvocationID.x (NOT gl_LocalInvocationIndex):
+        // the emulation kernels' staging math is authored against per-x-row
+        // lane numbering, and the RDNA4 corpus confirms it — switching to
+        // the flattened index regresses the int8/conv/blockscaled families
+        // (~30 kernels) while fixing nothing.
         writeln!(out, "    uint simd_lane  = gl_LocalInvocationID.x % {lw}u;").ok();
         writeln!(out, "    uint simd_group = gl_LocalInvocationID.x / {lw}u;").ok();
     }
@@ -1332,8 +1338,9 @@ impl GlslGenerator {
                 writeln!(out, "{pad}float {v} = {expr};").ok();
                 if *rk == ReduceKind::Mean {
                     // Mean is "sum / size"; the linear-add helper returns
-                    // the sum across exactly 32 lanes.
-                    writeln!(out, "{pad}{v} = {v} / 32.0;").ok();
+                    // the sum across exactly lane_width lanes.
+                    let lw = self.profile.lane_width;
+                    writeln!(out, "{pad}{v} = {v} / {lw}.0;").ok();
                 }
             }
             Op::SimdScan { value, op: rk, exclusive } => {
@@ -1443,6 +1450,10 @@ impl GlslGenerator {
             }
             Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
                 let m = sgm_name(*dest);
+                // Threadgroup arrays are DECLARED under safe_glsl_ident
+                // (names like `shared` collide with GLSL keywords) — read
+                // them back under the same mapping.
+                let tg = safe_glsl_ident(tg);
                 let off = self.vname(Some(*offset), block, ov);
                 writeln!(out, "{pad}{{ uint _base = simd_group * 64u;").ok();
                 for fnk in ["_sg_fn0", "_sg_fn1"] {
@@ -1842,7 +1853,10 @@ fn glsl_binop(op: BinOpKind, l: &str, r: &str) -> String {
         // GLSL 2-arg `atan(y, x)` returns the wrong quadrant for some
         // inputs (off by π).
         ATan2 => format!("mt_atan2(float({l}), float({r}))"),
-        Rem => format!("mod({l}, {r})"),
+        // GLSL `mod` is floor-mod (sign follows the divisor); Rust `%` and
+        // CUDA `fmodf` are trunc-mod (sign follows the dividend). Emit the
+        // trunc form so negative lhs matches the other backends.
+        Rem => format!("({l} - {r} * trunc({l} / {r}))"),
         Mod => format!("(uint({l}) % uint({r}))"),
         And => format!("(bool({l}) && bool({r}))"),
         Or => format!("(bool({l}) || bool({r}))"),
@@ -2121,14 +2135,20 @@ impl GlslGenerator {
                 next_binding += 1;
             }
         }
+        // Offsets follow GLSL `scalar` block layout: each member aligns to
+        // its own scalar size. The host payload builder (vulkan runtime)
+        // pads identically — keep the two in lockstep. Total size is
+        // rounded to 4 (vkCmdPushConstants requires size % 4 == 0).
         let mut push_bytes: u32 = 0;
         for ce in &kernel.constexprs {
-            push_bytes += ce.dtype.size_bytes() as u32;
+            let sz = ce.dtype.size_bytes() as u32;
+            push_bytes = push_bytes.div_ceil(sz) * sz + sz;
         }
         let has_n_elems = kernel.mode == KernelMode::Elementwise;
         if has_n_elems {
-            push_bytes += 4;
+            push_bytes = push_bytes.div_ceil(4) * 4 + 4;
         }
+        push_bytes = push_bytes.div_ceil(4) * 4;
         Ok(GlslBindingPlan { bindings, push_constant_bytes: push_bytes, has_n_elems })
     }
 }

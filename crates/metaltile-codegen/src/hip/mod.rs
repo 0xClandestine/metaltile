@@ -136,8 +136,12 @@ pub fn cuda_to_hip(cuda_src: &str) -> String {
     // `0xffffffffffffffffull` via a wave64-specific transform).
     //
     // We don't touch `__shfl_*_sync` itself — HIP exposes the same API as
-    // CUDA — only the mask literal width changes.
-    s = s.replace("0xffffffffu", "0xffffffffull");
+    // CUDA — only the mask literal width changes. A plain `str::replace`
+    // would match the prefix of its own output (`0xffffffffull` contains
+    // `0xffffffffu`) and emit `0xffffffffullll` on a second pass — scan
+    // and skip literals that already carry the `ll` suffix so the
+    // transform is idempotent.
+    s = widen_shfl_masks(&s);
 
     // Header preamble comment.
     s = s.replace(
@@ -146,6 +150,27 @@ pub fn cuda_to_hip(cuda_src: &str) -> String {
     );
 
     s
+}
+
+/// Widen CUDA 32-bit all-lanes shuffle masks (`0xffffffffu`) to the 64-bit
+/// container HIP requires (`0xffffffffull`), skipping occurrences that are
+/// already widened.
+fn widen_shfl_masks(s: &str) -> String {
+    const NARROW: &str = "0xffffffffu";
+    let mut out = String::with_capacity(s.len() + 64);
+    let mut rest = s;
+    while let Some(i) = rest.find(NARROW) {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + NARROW.len()..];
+        if tail.starts_with('l') {
+            out.push_str(NARROW); // already `0xffffffffull`
+        } else {
+            out.push_str("0xffffffffull");
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -223,10 +248,17 @@ mod tests {
     #[test]
     fn cuda_to_hip_is_idempotent() {
         // Running the transform twice produces the same output (each rule
-        // only fires against the CUDA spellings, not the HIP ones).
-        let src = HipGenerator::new().generate(&vector_add_ir()).unwrap();
+        // only fires against the CUDA spellings, not the HIP ones). Use the
+        // reduction kernel: it emits `__shfl_down_sync` masks, the rule most
+        // prone to matching its own output (`0xffffffffull` contains
+        // `0xffffffffu`).
+        let src = HipGenerator::new().generate(&row_reduce_sum_ir()).unwrap();
+        assert!(src.contains("0xffffffffull"), "expected widened shuffle mask");
         let twice = cuda_to_hip(&src);
         assert_eq!(src, twice);
+        // And the simple elementwise kernel stays covered.
+        let src = HipGenerator::new().generate(&vector_add_ir()).unwrap();
+        assert_eq!(src, cuda_to_hip(&src));
     }
 
     /// Build a simple reduction-mode kernel so the emitted source contains

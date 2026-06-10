@@ -44,7 +44,23 @@ fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    // Non-finite-aware: a plain `(x - y).abs()` fold has two holes. (1)
+    // f32::max DISCARDS NaN operands, so an all-NaN output scores 0.0 and
+    // passes. (2) Agreeing non-finites must PASS: logits-mask kernels write
+    // -inf on both sides, and (-inf) - (-inf) is NaN. Bitwise-equal values
+    // (covers equal infinities) and NaN-on-both-sides count as agreement;
+    // any one-sided NaN/inf maps to +inf so garbage fails loudly.
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            if x == y || (x.is_nan() && y.is_nan()) {
+                0.0
+            } else {
+                let d = (x - y).abs();
+                if d.is_nan() { f32::INFINITY } else { d }
+            }
+        })
+        .fold(0.0f32, f32::max)
 }
 
 /// Kernels expected to *generate + run* but mismatch the oracle on HIP
@@ -208,7 +224,17 @@ fn run_corpus_on_hip() {
         }
     }
 
-    assert!(pass > 0, "no kernels passed on HIP — pipeline broken");
+    // Pass floor (same rationale as the Vulkan corpus): hipRTC compile
+    // failures land in ERROR with a budget, but a regression that bucketed
+    // kernels as UNSUPPORTED would otherwise shrink coverage silently.
+    assert!(pass >= 3500, "only {pass} kernels passed on HIP — emitter or pipeline regression");
+    // Numeric mismatches are distinct from the launch-error budget below:
+    // KNOWN_HARD absorbs the documented tol-band outliers, so any other
+    // oracle mismatch on a kernel that RAN is a regression.
+    assert!(
+        mismatch == 0,
+        "{mismatch} HIP oracle mismatches on supported kernels — numerics regression"
+    );
     // Phase-2 NOTE: unlike CUDA we do not yet require zero hard-failures.
     // First run is exploratory — the AMD device math will produce some
     // tol-band mismatches on accumulation-heavy kernels that need a
