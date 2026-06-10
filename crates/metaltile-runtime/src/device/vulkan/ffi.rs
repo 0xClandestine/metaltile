@@ -13,7 +13,7 @@
 //!
 //! We implement only the path needed for: create instance → enumerate
 //! physical device → create logical device + compute queue → create buffers
-//! + memory + descriptor set → create compute pipeline from SPIR-V →
+//! plus memory and descriptor set → create compute pipeline from SPIR-V →
 //! `vkCmdDispatch` → readback. Everything else (windowing, graphics,
 //! sparse memory, ray-tracing) is intentionally out of scope.
 

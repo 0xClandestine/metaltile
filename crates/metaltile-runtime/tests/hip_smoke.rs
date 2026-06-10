@@ -237,7 +237,7 @@ fn hip_scale_add_exp_f32_tight_tol() {
     let max_rel: f32 = c
         .iter()
         .zip(&oracle)
-        .map(|(g, w)| ((g - w).abs() / w.abs().max(1e-30)))
+        .map(|(g, w)| (g - w).abs() / w.abs().max(1e-30))
         .fold(0.0f32, f32::max);
     eprintln!("hip_smoke: scale_add_exp max_rel = {max_rel:e}");
     assert!(max_rel < 5e-7, "scale_add_exp tol broken: max_rel = {max_rel:e}");
@@ -341,7 +341,7 @@ fn hip_row_reduce_sum_f32() {
     let max_rel: f32 = got
         .iter()
         .zip(&oracle)
-        .map(|(g, w)| ((g - w).abs() / w.abs().max(1e-30)))
+        .map(|(g, w)| (g - w).abs() / w.abs().max(1e-30))
         .fold(0.0f32, f32::max);
     eprintln!("hip_smoke: row_reduce_sum max_rel = {max_rel:e}");
     assert!(max_rel < 1e-5, "row_reduce_sum tol broken: max_rel = {max_rel:e}");

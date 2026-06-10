@@ -755,7 +755,7 @@ impl VulkanDevice {
                 .get(name)
                 .ok_or_else(|| MetalTileError::Dispatch(format!("missing constexpr '{name}'")))?;
             let align = bytes.len().max(1);
-            while push.len() % align != 0 {
+            while !push.len().is_multiple_of(align) {
                 push.push(0);
             }
             push.extend_from_slice(bytes);
@@ -770,13 +770,13 @@ impl VulkanDevice {
                     buffers.get(&p.name).map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
                 })
                 .unwrap_or(0);
-            while push.len() % 4 != 0 {
+            while !push.len().is_multiple_of(4) {
                 push.push(0);
             }
             push.extend_from_slice(&n_elems.to_le_bytes());
         }
         // vkCmdPushConstants requires size % 4 == 0.
-        while push.len() % 4 != 0 {
+        while !push.len().is_multiple_of(4) {
             push.push(0);
         }
 
@@ -950,8 +950,8 @@ impl VulkanDevice {
         Ok(out)
     }
 
-    /// Query name (best-effort): we don't link the extra "PhysicalDeviceProperties"
-    /// FFI in Phase 1, so this is a placeholder.
+    // Device-name query intentionally omitted (would need the extra
+    // PhysicalDeviceProperties FFI).
 
     // ──────────────────────────────────────────────────────────────────
     // Resident-buffer + cached-pipeline seam (mirrors CudaDevice::alloc_raw

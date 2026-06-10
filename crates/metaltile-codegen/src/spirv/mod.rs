@@ -783,6 +783,7 @@ impl GlslGenerator {
         child
     }
 
+    #[allow(clippy::too_many_arguments)] // emitter context: kernel, block, names, types, output
     fn emit_op(
         &self,
         op: &Op,
@@ -1325,7 +1326,7 @@ impl GlslGenerator {
                     Some(DType::I32) | Some(DType::I8) | Some(DType::I4) | Some(DType::I64) => {
                         format!("int({rv})")
                     },
-                    _ => format!("{rv}"),
+                    _ => rv.to_string(),
                 };
                 writeln!(out, "{pad}{n}[uint({iv})] = {val};").ok();
             },
@@ -1463,7 +1464,7 @@ impl GlslGenerator {
                 let val_cast = match dt {
                     DType::U32 | DType::U16 | DType::U8 => format!("uint({rv})"),
                     DType::I32 | DType::I8 | DType::I4 | DType::I64 => format!("int({rv})"),
-                    _ => format!("{rv}"),
+                    _ => rv.to_string(),
                 };
                 writeln!(out, "{pad}{f}({arr}[uint({iv})], {val_cast});").ok();
             },
@@ -1824,30 +1825,20 @@ impl GlslGenerator {
         for blk in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
             for op in &blk.ops {
                 if let Op::CoopTileSetup {
-                    name: nm,
-                    m,
-                    n,
-                    k,
-                    ta,
-                    tb,
-                    tc,
-                    acc_mode,
-                    exec_scope,
-                    ..
+                    name: nm, m, n, k, ta, tb, tc, acc_mode, exec_scope, ..
                 } = op
+                    && nm == name
                 {
-                    if nm == name {
-                        return Some((
-                            *m,
-                            *n,
-                            *k,
-                            *ta,
-                            *tb,
-                            *tc,
-                            matches!(acc_mode, CoopTileAccMode::MultiplyAccumulate),
-                            matches!(exec_scope, CoopTileScope::SimdGroup),
-                        ));
-                    }
+                    return Some((
+                        *m,
+                        *n,
+                        *k,
+                        *ta,
+                        *tb,
+                        *tc,
+                        matches!(acc_mode, CoopTileAccMode::MultiplyAccumulate),
+                        matches!(exec_scope, CoopTileScope::SimdGroup),
+                    ));
                 }
             }
         }
