@@ -16,8 +16,9 @@
 
 use std::collections::BTreeMap;
 
+use metaltile_codegen::error::Error as CodegenError;
 use metaltile_core::dtype::DType;
-use metaltile_runtime::CudaDevice;
+use metaltile_runtime::{CudaDevice, MetalTileError};
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
@@ -83,9 +84,6 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 /// remaining pure-DSL gaps (distinct from the cooperative/MMA backlog).
 /// A failure NOT matching one of these is a regression and fails the test.
 const KNOWN_HARD: &[(&str, &str)] = &[
-    // f32-only, ~3× over a tight 2e-2 tol; error grows with head_dim
-    // (flash-attention accumulation over K=head_dim). d64 + all f16/bf16 pass.
-    //
     // f16-only, DETERMINISTIC max|Δ|=5.0e-1 vs 5e-2 tol: the no_gqa fixture
     // is the file's documented gain-sensitive 3-step recurrence (its f32 tol
     // was already loosened 5e-3 → 1e-2 for the same drift). The f16-rounded
@@ -98,38 +96,22 @@ const KNOWN_HARD: &[(&str, &str)] = &[
 
 fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
-fn is_unsupported(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    [
-        // Codegen coverage gaps (kernel not wired yet on CUDA).
-        "phase 1",
-        "phase 2",
-        "not supported",
-        "not yet implemented",
-        "strided",
-        "kernelmode",
-        "multi-dimensional",
-        "transform",
-        "secondary",
-        // Device-capability limits (mirrors the Vulkan harness's device-cap
-        // bucket): a kernel the codegen *does* cover but the target arch
-        // physically cannot run. These reflect bit-accuracy on what the arch
-        // CAN run, so classify as UNSUPPORTED rather than a hard ERROR.
-        //   - >48KB dynamic shared memory on pre-Volta (sm_5x/6x, e.g. Pascal):
-        //     typed MetalTileError::DeviceCapability surfaced before launch.
-        "device capability",
-        "unsupported on this device",
-        ">48kb",
-        "dynamic shared memory",
-        //   - raw driver rejection if it ever escapes pre-launch validation.
-        "culaunchkernel: invalid argument",
-        //   - tensor-core MMA / WMMA paths needing sm_70+ on older arches.
-        "requires sm_70",
-        "tensor core",
-        "mma is not supported",
-    ]
-    .iter()
-    .any(|p| m.contains(p))
+/// UNSUPPORTED is decided on the TYPED error, not message sniffing:
+/// * `Codegen(UnsupportedOp)` — every codegen coverage gap (MMA/cooperative,
+///   Tile2D, multi-dim index, ops not wired yet) is raised as this variant.
+/// * `DeviceCapability` — kernels the codegen *does* cover but the target
+///   arch physically cannot run (e.g. >48KB dynamic shared memory on
+///   pre-Volta), surfaced before launch. These reflect bit-accuracy on what
+///   the arch CAN run, so they are not hard failures.
+///
+/// Anything else (NVRTC compile failure, launch error, missing buffer) on a
+/// kernel we claim to support stays a hard ERROR.
+fn is_unsupported(e: &MetalTileError) -> bool {
+    matches!(
+        e,
+        MetalTileError::Codegen(CodegenError::UnsupportedOp(_))
+            | MetalTileError::DeviceCapability(_)
+    )
 }
 
 #[test]
@@ -209,13 +191,13 @@ fn run_corpus_on_cuda() {
                     }
                 },
                 Err(e) => {
-                    let msg = e.to_string();
                     if known_hard(&label) {
                         known += 1;
-                    } else if is_unsupported(&msg) {
+                    } else if is_unsupported(&e) {
                         unsupported += 1;
                         // Bucket by the short reason (first line / key phrase).
-                        let reason = msg
+                        let reason = e
+                            .to_string()
                             .lines()
                             .next()
                             .unwrap_or("?")
@@ -227,7 +209,7 @@ fn run_corpus_on_cuda() {
                         *unsup_reasons.entry(reason).or_default() += 1;
                     } else {
                         error += 1;
-                        hard_failures.push(format!("ERROR {label}: {msg}"));
+                        hard_failures.push(format!("ERROR {label}: {e}"));
                     }
                 },
             }
