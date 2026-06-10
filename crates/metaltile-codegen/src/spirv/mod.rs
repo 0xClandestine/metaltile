@@ -1029,8 +1029,7 @@ impl GlslGenerator {
                 // broke every signed-quant decode on Vulkan (int8/fp4/fp8
                 // corpus families) — C++ backends keep the operand type, so
                 // mirror that when the lhs is `int`.
-                let signed_shift =
-                    matches!(bop, BinOpKind::Shl | BinOpKind::Shr) && lt == "int";
+                let signed_shift = matches!(bop, BinOpKind::Shl | BinOpKind::Shr) && lt == "int";
                 let ty = if signed_shift {
                     "int"
                 } else if int_op {
