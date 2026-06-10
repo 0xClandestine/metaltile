@@ -187,7 +187,7 @@ fn run_corpus_on_hip() {
                     if (worst as f64) <= tol {
                         pass += 1;
                         pass_names.push(label);
-                    } else if known_hard(t.name()) {
+                    } else if known_hard(&label) {
                         known += 1;
                     } else {
                         mismatch += 1;
@@ -197,7 +197,7 @@ fn run_corpus_on_hip() {
                 },
                 Err(e) => {
                     let msg = e.to_string();
-                    if known_hard(t.name()) {
+                    if known_hard(&label) {
                         known += 1;
                     } else if is_unsupported(&msg) {
                         unsupported += 1;
