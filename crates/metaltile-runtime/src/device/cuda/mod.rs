@@ -267,6 +267,9 @@ pub struct CudaDevice {
     /// Caching allocator active unless `METALTILE_POOL_ALLOC_OFF` is set.
     /// Cached once at create().
     pool_enabled: bool,
+    /// Pool soft cap in bytes ([`POOL_CAP_BYTES`] unless overridden via
+    /// `METALTILE_POOL_CAP_MB`). Cached once at create().
+    pool_cap: usize,
     /// Pinned host-staging buffers for async H2D: free-list by size, plus the
     /// in-flight list whose copies haven't been synced yet (reclaimed on the next
     /// `synchronize`/`download`). `usize` holds the host pointer.
@@ -372,6 +375,14 @@ impl CudaDevice {
             // showed raw cuMemAlloc/cuMemFree at 62% of CUDA API time. METALTILE_POOL_ALLOC_OFF=1
             // restores direct driver alloc/free (clean A/B). 4GB pool cap (POOL_CAP_BYTES).
             let pool_enabled = std::env::var("METALTILE_POOL_ALLOC_OFF").is_err();
+            // Pool cap override (MiB): a prefill forward's transients can exceed
+            // the 4 GiB default on large-batch MoE shapes, turning the pool into
+            // an evict/realloc churn (each cuMemAlloc ~1ms + device-wide sync).
+            let pool_cap = std::env::var("METALTILE_POOL_CAP_MB")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|mb| mb * 1024 * 1024)
+                .unwrap_or(POOL_CAP_BYTES);
             Ok(Some(CudaDevice {
                 ctx,
                 dev,
@@ -380,6 +391,7 @@ impl CudaDevice {
                 pool: Mutex::new(HashMap::new()),
                 pooled_bytes: Mutex::new(0),
                 pool_enabled,
+                pool_cap,
                 pinned_free: Mutex::new(HashMap::new()),
                 pinned_inflight: Mutex::new(Vec::new()),
                 stream,
@@ -1545,6 +1557,21 @@ impl CudaDevice {
         Ok(ptr)
     }
 
+    /// Zero-fill `len` bytes at `ptr`, stream-ordered on the device stream.
+    /// No host staging buffer and no stream drain — the cheap way to seed an
+    /// accumulator (vs uploading a host zero buffer, which for a [s,hid] f32
+    /// accumulator is a multi-MB pageable H2D copy per call).
+    pub fn memset_zero_raw(&self, ptr: CUdeviceptr, len: usize) -> Result<(), MetalTileError> {
+        self.ensure_current();
+        if ptr == 0 || len == 0 {
+            return Ok(());
+        }
+        cu_check(
+            unsafe { cuMemsetD8Async(ptr, 0, len, self.stream) },
+            "cuMemsetD8Async(zero)",
+        )
+    }
+
     /// Free a pointer returned by [`alloc_raw`]. No-op on a null pointer.
     /// Eagerly releases to the driver (use [`free_raw_pooled`] on the hot path).
     pub fn free_raw(&self, ptr: CUdeviceptr) {
@@ -1579,7 +1606,7 @@ impl CudaDevice {
             // buffer pointers, so releasing one to the driver makes replay read
             // freed memory ("unspecified launch failure"). Retain past the cap for
             // the (transient) capture; the pool drains normally afterward.
-            if *parked + bucket > POOL_CAP_BYTES && !self.is_capturing() {
+            if *parked + bucket > self.pool_cap && !self.is_capturing() {
                 drop(parked);
                 unsafe { cuMemFree_v2(ptr) };
                 return;
