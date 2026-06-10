@@ -33,10 +33,11 @@
 //! kernels bench honestly.
 #![cfg(feature = "cuda")]
 
+use std::collections::BTreeMap;
+
 use metaltile::runner::BenchStats;
 use metaltile_core::dtype::DType;
 use metaltile_runtime::CudaDevice;
-use std::collections::BTreeMap;
 
 /// Warmup launches (JIT/cache/clock ramp) before timing.
 const WARMUP: u32 = 5;
@@ -114,7 +115,7 @@ fn bench_corpus_on_cuda() {
                     // Effective bandwidth: bytes moved ÷ steady-state (min) latency.
                     let gbps = moved as f64 / (stats.min_us * 1_000.0);
                     rows.push(Row { name: t.name().to_string(), dt: dt_label(dt), stats, gbps });
-                }
+                },
                 // Unsupported / codegen-gap kernels just don't get a number.
                 Err(_) => skipped += 1,
             }
@@ -123,7 +124,9 @@ fn bench_corpus_on_cuda() {
 
     // Sort heaviest-first by steady-state latency — the meaningful signal at
     // corpus sizes (GB/s is launch-bound noise; see the module docs).
-    rows.sort_by(|a, b| b.stats.min_us.partial_cmp(&a.stats.min_us).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| {
+        b.stats.min_us.partial_cmp(&a.stats.min_us).unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     eprintln!(
         "{:<34} {:>5} {:>10} {:>10} {:>10} {:>8} {:>9}",

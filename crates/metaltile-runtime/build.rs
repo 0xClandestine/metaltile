@@ -25,11 +25,7 @@ fn cuda() {
     for sub in ["lib64", "lib64/stubs", "lib", "lib/stubs", "lib/x64"] {
         println!("cargo:rustc-link-search=native={cuda_root}/{sub}");
     }
-    for p in [
-        "/usr/lib/aarch64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/lib64",
-    ] {
+    for p in ["/usr/lib/aarch64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/usr/lib64"] {
         println!("cargo:rustc-link-search=native={p}");
     }
 
@@ -53,14 +49,28 @@ fn cuda() {
         println!("cargo:rerun-if-changed={src}");
         let obj = format!("{out_dir}/cutlass_moe.o");
         let status = std::process::Command::new(&nvcc)
-            .args(["-O3", "-std=c++17", &format!("-arch={arch}"), "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC"])
-            .args(["-I", &format!("{cutlass_dir}/include"), "-I", &format!("{cutlass_dir}/tools/util/include")])
+            .args([
+                "-O3",
+                "-std=c++17",
+                &format!("-arch={arch}"),
+                "--expt-relaxed-constexpr",
+                "-Xcompiler",
+                "-fPIC",
+            ])
+            .args([
+                "-I",
+                &format!("{cutlass_dir}/include"),
+                "-I",
+                &format!("{cutlass_dir}/tools/util/include"),
+            ])
             .args(["-c", &src, "-o", &obj])
             .status()
             .expect("nvcc invocation for cutlass_moe.cu failed to start");
         assert!(status.success(), "nvcc failed to compile cutlass_moe.cu");
         let lib = format!("{out_dir}/libcutlass_moe.a");
-        let ar = std::process::Command::new("ar").args(["crs", &lib, &obj]).status()
+        let ar = std::process::Command::new("ar")
+            .args(["crs", &lib, &obj])
+            .status()
             .expect("ar failed to start");
         assert!(ar.success(), "ar failed to archive cutlass_moe.o");
         println!("cargo:rustc-link-search=native={out_dir}");

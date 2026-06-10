@@ -16,18 +16,19 @@
 
 mod ffi;
 
-use std::collections::{BTreeMap, HashMap};
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr;
-use std::sync::Mutex;
+use std::{
+    collections::{BTreeMap, HashMap},
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_void},
+    ptr,
+    sync::Mutex,
+};
 
+use ffi::*;
 use metaltile_codegen::{CodegenBackend, CudaGenerator};
 use metaltile_core::ir::Kernel;
 
 use crate::error::MetalTileError;
-
-use ffi::*;
 
 /// Synthesize a Strided param's `_shape` or `_strides` (row-major) buffer
 /// from the static shape, as little-endian u32s. Unknown dims default to 1.
@@ -345,7 +346,20 @@ impl CudaDevice {
             // showed raw cuMemAlloc/cuMemFree at 62% of CUDA API time. METALTILE_POOL_ALLOC_OFF=1
             // restores direct driver alloc/free (clean A/B). 4GB pool cap (POOL_CAP_BYTES).
             let pool_enabled = std::env::var("METALTILE_POOL_ALLOC_OFF").is_err();
-            Ok(Some(CudaDevice { ctx, cc_major: major, cc_minor: minor, pool: Mutex::new(HashMap::new()), pooled_bytes: Mutex::new(0), pool_enabled, pinned_free: Mutex::new(HashMap::new()), pinned_inflight: Mutex::new(Vec::new()), stream, capturing: std::sync::atomic::AtomicBool::new(false), cublas: Mutex::new(0), cublaslt: Mutex::new((0, 0)) }))
+            Ok(Some(CudaDevice {
+                ctx,
+                cc_major: major,
+                cc_minor: minor,
+                pool: Mutex::new(HashMap::new()),
+                pooled_bytes: Mutex::new(0),
+                pool_enabled,
+                pinned_free: Mutex::new(HashMap::new()),
+                pinned_inflight: Mutex::new(Vec::new()),
+                stream,
+                capturing: std::sync::atomic::AtomicBool::new(false),
+                cublas: Mutex::new(0),
+                cublaslt: Mutex::new((0, 0)),
+            }))
         }
     }
 
@@ -373,7 +387,10 @@ impl CudaDevice {
                 // METALTILE_GEMM_ATOMICS=1 opts back into the nondeterministic
                 // heuristic (for A/B perf measurement only).
                 let atomics = std::env::var("METALTILE_GEMM_ATOMICS").ok().as_deref() == Some("1");
-                cublasSetAtomicsMode(h, if atomics { CUBLAS_ATOMICS_ALLOWED } else { CUBLAS_ATOMICS_NOT_ALLOWED });
+                cublasSetAtomicsMode(
+                    h,
+                    if atomics { CUBLAS_ATOMICS_ALLOWED } else { CUBLAS_ATOMICS_NOT_ALLOWED },
+                );
             }
             // Persistent 32MB cuBLAS workspace → GEMMs are CUDA-graph capture/replay
             // safe (default workspace is a transient per-call alloc that the graph
@@ -381,7 +398,9 @@ impl CudaDevice {
             // / null read on replay). Allocated once, never freed (device-lifetime).
             let ws_bytes = 32usize * 1024 * 1024;
             if let Ok(ws) = self.alloc_raw(ws_bytes) {
-                unsafe { cublasSetWorkspace_v2(h, ws as *mut std::ffi::c_void, ws_bytes); }
+                unsafe {
+                    cublasSetWorkspace_v2(h, ws as *mut std::ffi::c_void, ws_bytes);
+                }
             }
             *guard = h as usize;
         }
@@ -401,7 +420,10 @@ impl CudaDevice {
         use std::sync::OnceLock;
         static ALGO: OnceLock<c_int> = OnceLock::new();
         *ALGO.get_or_init(|| {
-            match std::env::var("METALTILE_GEMM_ALGO").ok().and_then(|s| s.trim().parse::<i32>().ok()) {
+            match std::env::var("METALTILE_GEMM_ALGO")
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+            {
                 Some(n) if (0..=15).contains(&n) => CUBLAS_GEMM_ALGO0_TENSOR_OP + n as c_int,
                 _ => CUBLAS_GEMM_DEFAULT_TENSOR_OP,
             }
@@ -442,7 +464,10 @@ impl CudaDevice {
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublas: unsupported dtype {other:?} (need f16/bf16)"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublas: unsupported dtype {other:?} (need f16/bf16)"
+                ))),
         };
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
@@ -453,22 +478,30 @@ impl CudaDevice {
         let st = unsafe {
             cublasGemmEx(
                 h,
-                CUBLAS_OP_T,            // op(A) = Aᵀ
-                CUBLAS_OP_N,            // op(B) = B
-                n as c_int,             // rows of op(A) and C  (col-major)
-                m as c_int,             // cols of op(B) and C
-                k as c_int,             // shared dim
+                CUBLAS_OP_T, // op(A) = Aᵀ
+                CUBLAS_OP_N, // op(B) = B
+                n as c_int,  // rows of op(A) and C  (col-major)
+                m as c_int,  // cols of op(B) and C
+                k as c_int,  // shared dim
                 &alpha as *const f32 as *const c_void,
-                w, cdt, k as c_int,     // A = W, lda = k
-                x, cdt, k as c_int,     // B = X, ldb = k
+                w,
+                cdt,
+                k as c_int, // A = W, lda = k
+                x,
+                cdt,
+                k as c_int, // B = X, ldb = k
                 &beta as *const f32 as *const c_void,
-                out, cdt, n as c_int,   // C = out, ldc = n
+                out,
+                cdt,
+                n as c_int, // C = out, ldc = n
                 CUBLAS_COMPUTE_32F,
-                Self::gemm_algo(),      // deterministic explicit algo (see gemm_algo)
+                Self::gemm_algo(), // deterministic explicit algo (see gemm_algo)
             )
         };
         if st != CUBLAS_STATUS_SUCCESS {
-            return Err(MetalTileError::Dispatch(format!("cublasGemmEx failed: status {st} (m={m} n={n} k={k})")));
+            return Err(MetalTileError::Dispatch(format!(
+                "cublasGemmEx failed: status {st} (m={m} n={n} k={k})"
+            )));
         }
         Ok(())
     }
@@ -496,38 +529,61 @@ impl CudaDevice {
     /// `out[t,n] = Σ_k a[t,k]·w[eid][n,k]`. Beats cuBLAS per-expert on the skinny
     /// MoE shape. Errors if the runtime was built without CUTLASS.
     pub fn moe_grouped_cutlass(
-        &self, a: CUdeviceptr, w: CUdeviceptr, c: CUdeviceptr,
-        group_rows: &[i32], expert_ids: &[i32], n: usize, k: usize,
+        &self,
+        a: CUdeviceptr,
+        w: CUdeviceptr,
+        c: CUdeviceptr,
+        group_rows: &[i32],
+        expert_ids: &[i32],
+        n: usize,
+        k: usize,
     ) -> Result<(), MetalTileError> {
         #[cfg(have_cutlass)]
         {
             unsafe extern "C" {
                 fn moe_grouped_gemm_cutlass(
-                    a: *const c_void, w: *const c_void, c: *mut c_void,
-                    group_rows: *const c_int, expert_ids: *const c_int,
-                    n_groups: c_int, n: c_int, k: c_int, stream: *mut c_void,
+                    a: *const c_void,
+                    w: *const c_void,
+                    c: *mut c_void,
+                    group_rows: *const c_int,
+                    expert_ids: *const c_int,
+                    n_groups: c_int,
+                    n: c_int,
+                    k: c_int,
+                    stream: *mut c_void,
                 ) -> c_int;
             }
             if group_rows.len() != expert_ids.len() {
-                return Err(MetalTileError::Dispatch("moe_grouped_cutlass: group_rows/expert_ids len mismatch".into()));
+                return Err(MetalTileError::Dispatch(
+                    "moe_grouped_cutlass: group_rows/expert_ids len mismatch".into(),
+                ));
             }
             let r = unsafe {
                 moe_grouped_gemm_cutlass(
-                    a as *const c_void, w as *const c_void, c as *mut c_void,
-                    group_rows.as_ptr(), expert_ids.as_ptr(),
-                    group_rows.len() as c_int, n as c_int, k as c_int,
+                    a as *const c_void,
+                    w as *const c_void,
+                    c as *mut c_void,
+                    group_rows.as_ptr(),
+                    expert_ids.as_ptr(),
+                    group_rows.len() as c_int,
+                    n as c_int,
+                    k as c_int,
                     self.stream as *mut c_void,
                 )
             };
             if r != 0 {
-                return Err(MetalTileError::Dispatch(format!("moe_grouped_gemm_cutlass failed: code {r}")));
+                return Err(MetalTileError::Dispatch(format!(
+                    "moe_grouped_gemm_cutlass failed: code {r}"
+                )));
             }
             Ok(())
         }
         #[cfg(not(have_cutlass))]
         {
             let _ = (a, w, c, group_rows, expert_ids, n, k);
-            Err(MetalTileError::Dispatch("moe_grouped_cutlass: runtime built without CUTLASS (set CUTLASS_DIR)".into()))
+            Err(MetalTileError::Dispatch(
+                "moe_grouped_cutlass: runtime built without CUTLASS (set CUTLASS_DIR)".into(),
+            ))
         }
     }
 
@@ -577,13 +633,19 @@ impl CudaDevice {
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublaslt: unsupported dtype {other:?} (need f16/bf16)"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublaslt: unsupported dtype {other:?} (need f16/bf16)"
+                ))),
         };
         let ddt = match out_dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
             metaltile_core::DType::F32 => CUDA_R_32F,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublaslt: unsupported out_dtype {other:?}"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublaslt: unsupported out_dtype {other:?}"
+                ))),
         };
         // Col-major identity (same as gemm_cublas): out_cm[n,m] = (W^T)·X.
         //   op(A)=T, op(B)=N; A=W (rows=k, cols=n, ld=k), B=X (rows=k, cols=m, ld=k),
@@ -593,11 +655,23 @@ impl CudaDevice {
         unsafe {
             let mut desc: cublasLtMatmulDesc_t = ptr::null_mut();
             let s = cublasLtMatmulDescCreate(&mut desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-            if s != CUBLAS_STATUS_SUCCESS { return Err(MetalTileError::Dispatch(format!("cublasLtMatmulDescCreate: {s}"))); }
+            if s != CUBLAS_STATUS_SUCCESS {
+                return Err(MetalTileError::Dispatch(format!("cublasLtMatmulDescCreate: {s}")));
+            }
             let opt = CUBLAS_OP_T;
             let opn = CUBLAS_OP_N;
-            cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSA, &opt as *const c_int as *const c_void, std::mem::size_of::<c_int>());
-            cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSB, &opn as *const c_int as *const c_void, std::mem::size_of::<c_int>());
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSA,
+                &opt as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSB,
+                &opn as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
 
             // Layouts describe the PHYSICAL (untransposed) storage, col-major.
             // A=W is [n,k] row-major == [k,n] col-major → rows=k, cols=n, ld=k.
@@ -613,38 +687,73 @@ impl CudaDevice {
             let mut pref: cublasLtMatmulPreference_t = ptr::null_mut();
             cublasLtMatmulPreferenceCreate(&mut pref);
             let ws_bytes: usize = CUBLASLT_WORKSPACE_BYTES;
-            cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes as *const usize as *const c_void, std::mem::size_of::<usize>());
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &ws_bytes as *const usize as *const c_void,
+                std::mem::size_of::<usize>(),
+            );
             // THE determinism lever: restrict allowed reduction schemes to NONE,
             // so the heuristic never returns a split-K (atomic-accumulate) algo.
             let red_mask: u32 = CUBLASLT_REDUCTION_SCHEME_NONE;
-            cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &red_mask as *const u32 as *const c_void, std::mem::size_of::<u32>());
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                &red_mask as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+            );
 
             let mut result = cublasLtMatmulHeuristicResult_t::default();
             let mut returned: c_int = 0;
-            let hs = cublasLtMatmulAlgoGetHeuristic(lt, desc, a_l, b_l, d_l, d_l, pref, 1, &mut result, &mut returned);
+            let hs = cublasLtMatmulAlgoGetHeuristic(
+                lt,
+                desc,
+                a_l,
+                b_l,
+                d_l,
+                d_l,
+                pref,
+                1,
+                &mut result,
+                &mut returned,
+            );
             if hs != CUBLAS_STATUS_SUCCESS || returned < 1 {
                 cublasLtMatmulPreferenceDestroy(pref);
-                cublasLtMatrixLayoutDestroy(a_l); cublasLtMatrixLayoutDestroy(b_l); cublasLtMatrixLayoutDestroy(d_l);
+                cublasLtMatrixLayoutDestroy(a_l);
+                cublasLtMatrixLayoutDestroy(b_l);
+                cublasLtMatrixLayoutDestroy(d_l);
                 cublasLtMatmulDescDestroy(desc);
-                return Err(MetalTileError::Dispatch(format!("cublasLt: no deterministic algo (m={m} n={n} k={k} status={hs} returned={returned})")));
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLt: no deterministic algo (m={m} n={n} k={k} status={hs} returned={returned})"
+                )));
             }
             let mm = cublasLtMatmul(
-                lt, desc,
+                lt,
+                desc,
                 &alpha as *const f32 as *const c_void,
-                w, a_l,
-                x, b_l,
+                w,
+                a_l,
+                x,
+                b_l,
                 &beta as *const f32 as *const c_void,
-                out, d_l,
-                out, d_l,
+                out,
+                d_l,
+                out,
+                d_l,
                 result.algo.as_ptr(),
-                workspace, ws_bytes,
+                workspace,
+                ws_bytes,
                 self.stream,
             );
             cublasLtMatmulPreferenceDestroy(pref);
-            cublasLtMatrixLayoutDestroy(a_l); cublasLtMatrixLayoutDestroy(b_l); cublasLtMatrixLayoutDestroy(d_l);
+            cublasLtMatrixLayoutDestroy(a_l);
+            cublasLtMatrixLayoutDestroy(b_l);
+            cublasLtMatrixLayoutDestroy(d_l);
             cublasLtMatmulDescDestroy(desc);
             if mm != CUBLAS_STATUS_SUCCESS {
-                return Err(MetalTileError::Dispatch(format!("cublasLtMatmul failed: status {mm} (m={m} n={n} k={k})")));
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLtMatmul failed: status {mm} (m={m} n={n} k={k})"
+                )));
             }
         }
         Ok(())
@@ -659,23 +768,43 @@ impl CudaDevice {
     #[allow(clippy::too_many_arguments)]
     pub fn gemm_cublas_strided_batched(
         &self,
-        x_base: CUdeviceptr, stride_x: i64,
-        w_base: CUdeviceptr, stride_w: i64,
-        out_base: CUdeviceptr, stride_out: i64,
-        m: usize, n: usize, k: usize,
+        x_base: CUdeviceptr,
+        stride_x: i64,
+        w_base: CUdeviceptr,
+        stride_w: i64,
+        out_base: CUdeviceptr,
+        stride_out: i64,
+        m: usize,
+        n: usize,
+        k: usize,
         batch_count: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
         // DETERMINISTIC by default via cublasLt (split-K reductions forbidden);
         // see gemm_cublas. METALTILE_GEMM_NONDET=1 → legacy nondeterministic path.
         if std::env::var("METALTILE_GEMM_NONDET").ok().as_deref() != Some("1") {
-            return self.gemm_cublaslt_strided_batched(x_base, stride_x, w_base, stride_w, out_base, stride_out, m, n, k, batch_count, dtype);
+            return self.gemm_cublaslt_strided_batched(
+                x_base,
+                stride_x,
+                w_base,
+                stride_w,
+                out_base,
+                stride_out,
+                m,
+                n,
+                k,
+                batch_count,
+                dtype,
+            );
         }
         let h = self.cublas_handle()?;
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublas_strided_batched: unsupported dtype {other:?}"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublas_strided_batched: unsupported dtype {other:?}"
+                ))),
         };
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
@@ -687,19 +816,32 @@ impl CudaDevice {
                 h,
                 CUBLAS_OP_T,
                 CUBLAS_OP_N,
-                n as c_int, m as c_int, k as c_int,
+                n as c_int,
+                m as c_int,
+                k as c_int,
                 &alpha as *const f32 as *const c_void,
-                w_base, cdt, k as c_int, stride_w / el,
-                x_base, cdt, k as c_int, stride_x / el,
+                w_base,
+                cdt,
+                k as c_int,
+                stride_w / el,
+                x_base,
+                cdt,
+                k as c_int,
+                stride_x / el,
                 &beta as *const f32 as *const c_void,
-                out_base, cdt, n as c_int, stride_out / el,
+                out_base,
+                cdt,
+                n as c_int,
+                stride_out / el,
                 batch_count as c_int,
                 CUBLAS_COMPUTE_32F,
-                Self::gemm_algo(),      // deterministic explicit algo (see gemm_algo)
+                Self::gemm_algo(), // deterministic explicit algo (see gemm_algo)
             )
         };
         if st != CUBLAS_STATUS_SUCCESS {
-            return Err(MetalTileError::Dispatch(format!("cublasGemmStridedBatchedEx failed: {st} (m={m} n={n} k={k} batch={batch_count})")));
+            return Err(MetalTileError::Dispatch(format!(
+                "cublasGemmStridedBatchedEx failed: {st} (m={m} n={n} k={k} batch={batch_count})"
+            )));
         }
         Ok(())
     }
@@ -709,10 +851,15 @@ impl CudaDevice {
     #[allow(clippy::too_many_arguments)]
     pub fn gemm_cublaslt_strided_batched(
         &self,
-        x_base: CUdeviceptr, stride_x: i64,
-        w_base: CUdeviceptr, stride_w: i64,
-        out_base: CUdeviceptr, stride_out: i64,
-        m: usize, n: usize, k: usize,
+        x_base: CUdeviceptr,
+        stride_x: i64,
+        w_base: CUdeviceptr,
+        stride_w: i64,
+        out_base: CUdeviceptr,
+        stride_out: i64,
+        m: usize,
+        n: usize,
+        k: usize,
         batch_count: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
@@ -720,7 +867,10 @@ impl CudaDevice {
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublaslt_strided_batched: unsupported dtype {other:?}"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublaslt_strided_batched: unsupported dtype {other:?}"
+                ))),
         };
         let el = 2i64; // bytes per f16/bf16 element
         let bc = batch_count as i32;
@@ -733,10 +883,25 @@ impl CudaDevice {
         unsafe {
             let mut desc: cublasLtMatmulDesc_t = ptr::null_mut();
             let s = cublasLtMatmulDescCreate(&mut desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-            if s != CUBLAS_STATUS_SUCCESS { return Err(MetalTileError::Dispatch(format!("cublasLtMatmulDescCreate(strided): {s}"))); }
-            let opt = CUBLAS_OP_T; let opn = CUBLAS_OP_N;
-            cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSA, &opt as *const c_int as *const c_void, std::mem::size_of::<c_int>());
-            cublasLtMatmulDescSetAttribute(desc, CUBLASLT_MATMUL_DESC_TRANSB, &opn as *const c_int as *const c_void, std::mem::size_of::<c_int>());
+            if s != CUBLAS_STATUS_SUCCESS {
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLtMatmulDescCreate(strided): {s}"
+                )));
+            }
+            let opt = CUBLAS_OP_T;
+            let opn = CUBLAS_OP_N;
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSA,
+                &opt as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSB,
+                &opn as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
 
             // Same per-matrix layouts as gemm_cublaslt, plus batch count + stride.
             let mut a_l: cublasLtMatrixLayout_t = ptr::null_mut();
@@ -746,8 +911,18 @@ impl CudaDevice {
             cublasLtMatrixLayoutCreate(&mut b_l, cdt, k as u64, m as u64, k as i64);
             cublasLtMatrixLayoutCreate(&mut d_l, cdt, n as u64, m as u64, n as i64);
             let set_batch = |layout: cublasLtMatrixLayout_t, stride: i64| {
-                cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &bc as *const i32 as *const c_void, std::mem::size_of::<i32>());
-                cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride as *const i64 as *const c_void, std::mem::size_of::<i64>());
+                cublasLtMatrixLayoutSetAttribute(
+                    layout,
+                    CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                    &bc as *const i32 as *const c_void,
+                    std::mem::size_of::<i32>(),
+                );
+                cublasLtMatrixLayoutSetAttribute(
+                    layout,
+                    CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                    &stride as *const i64 as *const c_void,
+                    std::mem::size_of::<i64>(),
+                );
             };
             set_batch(a_l, off_a);
             set_batch(b_l, off_b);
@@ -756,36 +931,71 @@ impl CudaDevice {
             let mut pref: cublasLtMatmulPreference_t = ptr::null_mut();
             cublasLtMatmulPreferenceCreate(&mut pref);
             let ws_bytes: usize = CUBLASLT_WORKSPACE_BYTES;
-            cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &ws_bytes as *const usize as *const c_void, std::mem::size_of::<usize>());
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &ws_bytes as *const usize as *const c_void,
+                std::mem::size_of::<usize>(),
+            );
             let red_mask: u32 = CUBLASLT_REDUCTION_SCHEME_NONE;
-            cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &red_mask as *const u32 as *const c_void, std::mem::size_of::<u32>());
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                &red_mask as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+            );
 
             let mut result = cublasLtMatmulHeuristicResult_t::default();
             let mut returned: c_int = 0;
-            let hs = cublasLtMatmulAlgoGetHeuristic(lt, desc, a_l, b_l, d_l, d_l, pref, 1, &mut result, &mut returned);
+            let hs = cublasLtMatmulAlgoGetHeuristic(
+                lt,
+                desc,
+                a_l,
+                b_l,
+                d_l,
+                d_l,
+                pref,
+                1,
+                &mut result,
+                &mut returned,
+            );
             if hs != CUBLAS_STATUS_SUCCESS || returned < 1 {
                 cublasLtMatmulPreferenceDestroy(pref);
-                cublasLtMatrixLayoutDestroy(a_l); cublasLtMatrixLayoutDestroy(b_l); cublasLtMatrixLayoutDestroy(d_l);
+                cublasLtMatrixLayoutDestroy(a_l);
+                cublasLtMatrixLayoutDestroy(b_l);
+                cublasLtMatrixLayoutDestroy(d_l);
                 cublasLtMatmulDescDestroy(desc);
-                return Err(MetalTileError::Dispatch(format!("cublasLt(strided): no deterministic algo (m={m} n={n} k={k} batch={batch_count} status={hs} returned={returned})")));
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLt(strided): no deterministic algo (m={m} n={n} k={k} batch={batch_count} status={hs} returned={returned})"
+                )));
             }
             let mm = cublasLtMatmul(
-                lt, desc,
+                lt,
+                desc,
                 &alpha as *const f32 as *const c_void,
-                w_base, a_l,
-                x_base, b_l,
+                w_base,
+                a_l,
+                x_base,
+                b_l,
                 &beta as *const f32 as *const c_void,
-                out_base, d_l,
-                out_base, d_l,
+                out_base,
+                d_l,
+                out_base,
+                d_l,
                 result.algo.as_ptr(),
-                workspace, ws_bytes,
+                workspace,
+                ws_bytes,
                 self.stream,
             );
             cublasLtMatmulPreferenceDestroy(pref);
-            cublasLtMatrixLayoutDestroy(a_l); cublasLtMatrixLayoutDestroy(b_l); cublasLtMatrixLayoutDestroy(d_l);
+            cublasLtMatrixLayoutDestroy(a_l);
+            cublasLtMatrixLayoutDestroy(b_l);
+            cublasLtMatrixLayoutDestroy(d_l);
             cublasLtMatmulDescDestroy(desc);
             if mm != CUBLAS_STATUS_SUCCESS {
-                return Err(MetalTileError::Dispatch(format!("cublasLtMatmul(strided) failed: status {mm} (m={m} n={n} k={k} batch={batch_count})")));
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLtMatmul(strided) failed: status {mm} (m={m} n={n} k={k} batch={batch_count})"
+                )));
             }
         }
         Ok(())
@@ -803,25 +1013,30 @@ impl CudaDevice {
     #[allow(clippy::too_many_arguments)]
     pub fn gemm_cublas_grouped(
         &self,
-        x_ptrs: &[u64],       // [group_count] device pointers for X
-        w_ptrs: &[u64],       // [group_count] device pointers for W
-        out_ptrs: &[u64],     // [group_count] device pointers for Out
-        m_per_group: &[i32],  // [group_count] rows per group (token count)
-        n: usize,             // shared output dim
-        k: usize,             // shared input dim
+        x_ptrs: &[u64],      // [group_count] device pointers for X
+        w_ptrs: &[u64],      // [group_count] device pointers for W
+        out_ptrs: &[u64],    // [group_count] device pointers for Out
+        m_per_group: &[i32], // [group_count] rows per group (token count)
+        n: usize,            // shared output dim
+        k: usize,            // shared input dim
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
         let group_count = x_ptrs.len();
         assert_eq!(w_ptrs.len(), group_count);
         assert_eq!(out_ptrs.len(), group_count);
         assert_eq!(m_per_group.len(), group_count);
-        if group_count == 0 { return Ok(()); }
+        if group_count == 0 {
+            return Ok(());
+        }
 
         let h = self.cublas_handle()?;
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublas_grouped: unsupported dtype {other:?}"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublas_grouped: unsupported dtype {other:?}"
+                ))),
         };
         // cublasGemmGroupedBatchedEx: col-major same as GemmEx.
         // Row-major C[m_i,n] = X[m_i,k] · W[n,k]^T
@@ -840,9 +1055,9 @@ impl CudaDevice {
         let m_arr: Vec<c_int> = vec![n_i; group_count];
         let n_arr: Vec<c_int> = m_per_group.to_vec();
         let k_arr: Vec<c_int> = vec![k_i; group_count];
-        let lda:   Vec<c_int> = vec![k_i; group_count]; // A=W, lda=k
-        let ldb:   Vec<c_int> = vec![k_i; group_count]; // B=X, ldb=k
-        let ldc:   Vec<c_int> = vec![n_i; group_count]; // C=out, ldc=n
+        let lda: Vec<c_int> = vec![k_i; group_count]; // A=W, lda=k
+        let ldb: Vec<c_int> = vec![k_i; group_count]; // B=X, ldb=k
+        let ldc: Vec<c_int> = vec![n_i; group_count]; // C=out, ldc=n
         let group_sizes: Vec<c_int> = vec![1i32; group_count];
 
         // Build void* pointer arrays (W, X, Out) for cuBLAS.
@@ -859,15 +1074,16 @@ impl CudaDevice {
         let triple_bytes = ptr_bytes * 3;
         // Layout: [A(W) | B(X) | C(Out)] contiguous.
         let mut staging: Vec<u64> = Vec::with_capacity(group_count * 3);
-        staging.extend_from_slice(w_ptrs);   // A = W device pointers
-        staging.extend_from_slice(x_ptrs);   // B = X device pointers
+        staging.extend_from_slice(w_ptrs); // A = W device pointers
+        staging.extend_from_slice(x_ptrs); // B = X device pointers
         staging.extend_from_slice(out_ptrs); // C = Out device pointers
 
         let base = self.alloc_raw(triple_bytes)?;
         let a_dev: CUdeviceptr = base;
         let b_dev: CUdeviceptr = base + ptr_bytes as CUdeviceptr;
         let c_dev: CUdeviceptr = base + (2 * ptr_bytes) as CUdeviceptr;
-        let all_bytes = unsafe { std::slice::from_raw_parts(staging.as_ptr() as *const u8, triple_bytes) };
+        let all_bytes =
+            unsafe { std::slice::from_raw_parts(staging.as_ptr() as *const u8, triple_bytes) };
         // Single synchronous H2D: `staging` is pageable host memory, so a sync copy
         // guarantees it's fully consumed before this Vec drops (correctness over the
         // marginal async win for a ≤few-KB pointer array). cuBLAS reads a_dev/b_dev/
@@ -876,7 +1092,17 @@ impl CudaDevice {
         // after any prior GEMM's stream read of a recycled copy (see the same
         // fix + rationale in gemm_cublas_batched). Pageable src ⇒ host-sync copy,
         // so `staging` stays valid through the call.
-        cu_check(unsafe { cuMemcpyHtoDAsync_v2(a_dev, all_bytes.as_ptr() as *const c_void, triple_bytes, self.stream) }, "cuMemcpyHtoDAsync(grouped_ptrs)")?;
+        cu_check(
+            unsafe {
+                cuMemcpyHtoDAsync_v2(
+                    a_dev,
+                    all_bytes.as_ptr() as *const c_void,
+                    triple_bytes,
+                    self.stream,
+                )
+            },
+            "cuMemcpyHtoDAsync(grouped_ptrs)",
+        )?;
 
         let st = unsafe {
             cublasGemmGroupedBatchedEx(
@@ -930,18 +1156,25 @@ impl CudaDevice {
         x_ptrs: &[u64],   // [batch] device ptr per X (rows operand)
         w_ptrs: &[u64],   // [batch] device ptr per W (weight operand)
         out_ptrs: &[u64], // [batch] device ptr per Out
-        m: usize, n: usize, k: usize,
+        m: usize,
+        n: usize,
+        k: usize,
         dtype: metaltile_core::DType,
     ) -> Result<(), MetalTileError> {
         let batch_count = x_ptrs.len();
         assert_eq!(w_ptrs.len(), batch_count);
         assert_eq!(out_ptrs.len(), batch_count);
-        if batch_count == 0 { return Ok(()); }
+        if batch_count == 0 {
+            return Ok(());
+        }
         let h = self.cublas_handle()?;
         let cdt = match dtype {
             metaltile_core::DType::F16 => CUDA_R_16F,
             metaltile_core::DType::BF16 => CUDA_R_16BF,
-            other => return Err(MetalTileError::Dispatch(format!("gemm_cublas_batched: unsupported dtype {other:?}"))),
+            other =>
+                return Err(MetalTileError::Dispatch(format!(
+                    "gemm_cublas_batched: unsupported dtype {other:?}"
+                ))),
         };
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
@@ -953,14 +1186,15 @@ impl CudaDevice {
         let ptr_bytes = batch_count * 8;
         let triple_bytes = ptr_bytes * 3;
         let mut staging: Vec<u64> = Vec::with_capacity(batch_count * 3);
-        staging.extend_from_slice(w_ptrs);   // A = W
-        staging.extend_from_slice(x_ptrs);   // B = X
+        staging.extend_from_slice(w_ptrs); // A = W
+        staging.extend_from_slice(x_ptrs); // B = X
         staging.extend_from_slice(out_ptrs); // C = Out
         let base = self.alloc_raw(triple_bytes)?;
         let a_dev: CUdeviceptr = base;
         let b_dev: CUdeviceptr = base + ptr_bytes as CUdeviceptr;
         let c_dev: CUdeviceptr = base + (2 * ptr_bytes) as CUdeviceptr;
-        let all_bytes = unsafe { std::slice::from_raw_parts(staging.as_ptr() as *const u8, triple_bytes) };
+        let all_bytes =
+            unsafe { std::slice::from_raw_parts(staging.as_ptr() as *const u8, triple_bytes) };
         // H2D on self.stream (NOT the null stream): the pooled ptr-array buffer is
         // recycled across calls, and the PRIOR batched/grouped GEMM reading its
         // copy of the array runs on self.stream. A synchronous null-stream copy
@@ -969,18 +1203,36 @@ impl CudaDevice {
         // chunk of a 4-chunk SSD scan corrupted). Issuing the copy on self.stream
         // makes stream order serialize prior-read → this-write. (Pageable src ⇒
         // the async copy is host-synchronous, so `staging` stays valid.)
-        cu_check(unsafe { cuMemcpyHtoDAsync_v2(a_dev, all_bytes.as_ptr() as *const c_void, triple_bytes, self.stream) }, "cuMemcpyHtoDAsync(batched_ptrs)")?;
+        cu_check(
+            unsafe {
+                cuMemcpyHtoDAsync_v2(
+                    a_dev,
+                    all_bytes.as_ptr() as *const c_void,
+                    triple_bytes,
+                    self.stream,
+                )
+            },
+            "cuMemcpyHtoDAsync(batched_ptrs)",
+        )?;
         let st = unsafe {
             cublasGemmBatchedEx(
                 h,
                 CUBLAS_OP_T,
                 CUBLAS_OP_N,
-                n as c_int, m as c_int, k as c_int,
+                n as c_int,
+                m as c_int,
+                k as c_int,
                 &alpha as *const f32 as *const c_void,
-                a_dev as *const *const c_void, cdt, k as c_int,
-                b_dev as *const *const c_void, cdt, k as c_int,
+                a_dev as *const *const c_void,
+                cdt,
+                k as c_int,
+                b_dev as *const *const c_void,
+                cdt,
+                k as c_int,
                 &beta as *const f32 as *const c_void,
-                c_dev as *const *mut c_void, cdt, n as c_int,
+                c_dev as *const *mut c_void,
+                cdt,
+                n as c_int,
                 batch_count as c_int,
                 CUBLAS_COMPUTE_32F,
                 Self::gemm_algo(),
@@ -1019,8 +1271,9 @@ impl CudaDevice {
         )?;
 
         // Compile to the device's virtual architecture.
-        let arch = CString::new(format!("--gpu-architecture=compute_{}{}", self.cc_major, self.cc_minor))
-            .unwrap();
+        let arch =
+            CString::new(format!("--gpu-architecture=compute_{}{}", self.cc_major, self.cc_minor))
+                .unwrap();
         // NVRTC does not auto-include the toolkit headers (cuda_fp16.h,
         // cuda_bf16.h) — point it at <toolkit>/include.
         let cuda_root = std::env::var("CUDA_PATH")
@@ -1066,11 +1319,16 @@ impl CudaDevice {
                 }
                 None
             };
-            if std::path::Path::new(&fixed1).exists() { Some(fixed1) }
-            else if std::path::Path::new(&fixed2).exists() { Some(fixed2) }
-            else { by_toolkit() }
+            if std::path::Path::new(&fixed1).exists() {
+                Some(fixed1)
+            } else if std::path::Path::new(&fixed2).exists() {
+                Some(fixed2)
+            } else {
+                by_toolkit()
+            }
         };
-        let cccl_inc = cccl_path.as_ref().map(|p| CString::new(format!("--include-path={p}")).unwrap());
+        let cccl_inc =
+            cccl_path.as_ref().map(|p| CString::new(format!("--include-path={p}")).unwrap());
         // Disable contraction of `a*b+c` into FMA by default: the CPU oracle
         // uses non-fused IEEE arithmetic, so default FMA fusion drifts in
         // accumulation-heavy kernels (conv, attention, recurrence). Matching
@@ -1086,26 +1344,29 @@ impl CudaDevice {
         // MT_FAST_MATH=1: enable --use_fast_math (implies --fmad=true + fast
         // intrinsics: __expf, __sinf, etc.). Trades ~1-2 ULP precision for
         // ~2-4x faster transcendentals. Safe for inference softmax.
-        let fast_math_on = std::env::var("MT_FAST_MATH").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let fast_math_on =
+            std::env::var("MT_FAST_MATH").map(|v| v == "1" || v == "true").unwrap_or(false);
         let compile_res = match (fast_math_on, cccl_inc.as_ref()) {
             (true, Some(cccl)) => {
                 let fast = CString::new("--use_fast_math").unwrap();
-                let opts: [*const c_char; 4] = [arch.as_ptr(), inc.as_ptr(), cccl.as_ptr(), fast.as_ptr()];
+                let opts: [*const c_char; 4] =
+                    [arch.as_ptr(), inc.as_ptr(), cccl.as_ptr(), fast.as_ptr()];
                 unsafe { nvrtcCompileProgram(prog, opts.len() as _, opts.as_ptr()) }
-            }
+            },
             (false, Some(cccl)) => {
-                let opts: [*const c_char; 4] = [arch.as_ptr(), inc.as_ptr(), cccl.as_ptr(), fmad.as_ptr()];
+                let opts: [*const c_char; 4] =
+                    [arch.as_ptr(), inc.as_ptr(), cccl.as_ptr(), fmad.as_ptr()];
                 unsafe { nvrtcCompileProgram(prog, opts.len() as _, opts.as_ptr()) }
-            }
+            },
             (true, None) => {
                 let fast = CString::new("--use_fast_math").unwrap();
                 let opts: [*const c_char; 3] = [arch.as_ptr(), inc.as_ptr(), fast.as_ptr()];
                 unsafe { nvrtcCompileProgram(prog, opts.len() as _, opts.as_ptr()) }
-            }
+            },
             (false, None) => {
                 let opts: [*const c_char; 3] = [arch.as_ptr(), inc.as_ptr(), fmad.as_ptr()];
                 unsafe { nvrtcCompileProgram(prog, opts.len() as _, opts.as_ptr()) }
-            }
+            },
         };
 
         // Always fetch the log — it carries the actual compiler diagnostics.
@@ -1185,10 +1446,7 @@ impl CudaDevice {
                 },
                 "cuMemcpyHtoDAsync(upload)",
             )?;
-            cu_check(
-                unsafe { cuStreamSynchronize(self.stream) },
-                "cuStreamSynchronize(upload)",
-            )?;
+            cu_check(unsafe { cuStreamSynchronize(self.stream) }, "cuStreamSynchronize(upload)")?;
         }
         Ok(buf)
     }
@@ -1319,7 +1577,9 @@ impl CudaDevice {
         // interleaved with the on-stream expert GEMMs).
         if len > 262_144 {
             return cu_check(
-                unsafe { cuMemcpyHtoDAsync_v2(ptr, bytes.as_ptr() as *const c_void, len, self.stream) },
+                unsafe {
+                    cuMemcpyHtoDAsync_v2(ptr, bytes.as_ptr() as *const c_void, len, self.stream)
+                },
                 "cuMemcpyHtoDAsync(large)",
             );
         }
@@ -1329,7 +1589,7 @@ impl CudaDevice {
                 let mut p: *mut c_void = ptr::null_mut();
                 cu_check(unsafe { cuMemAllocHost_v2(&mut p, len) }, "cuMemAllocHost")?;
                 p as usize
-            }
+            },
         };
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), pinned as *mut u8, len) };
         cu_check(
@@ -1400,8 +1660,12 @@ impl CudaDevice {
             unsafe {
                 cuLaunchKernel(
                     func.func,
-                    grid[0], grid[1], grid[2],
-                    block[0], block[1], block[2],
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    block[0],
+                    block[1],
+                    block[2],
                     shared_bytes,
                     self.stream,
                     args.as_mut_ptr(),
@@ -1431,8 +1695,12 @@ impl CudaDevice {
             unsafe {
                 cuLaunchKernel(
                     func.func,
-                    grid[0], grid[1], grid[2],
-                    block[0], block[1], block[2],
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    block[0],
+                    block[1],
+                    block[2],
                     shared_bytes,
                     self.stream,
                     args.as_mut_ptr(),
@@ -1461,8 +1729,12 @@ impl CudaDevice {
             unsafe {
                 cuLaunchCooperativeKernel(
                     func.func,
-                    grid[0], grid[1], grid[2],
-                    block[0], block[1], block[2],
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    block[0],
+                    block[1],
+                    block[2],
                     shared_bytes,
                     self.stream,
                     args.as_mut_ptr(),
@@ -1475,22 +1747,24 @@ impl CudaDevice {
     /// Returns `true` if a CUDA-graph capture is currently in progress on this
     /// device's stream. Callers that use non-capturable launches (e.g. cooperative
     /// kernel) must fall back to a capturable alternative during capture.
-    pub fn is_capturing(&self) -> bool {
-        self.capturing.load(std::sync::atomic::Ordering::SeqCst)
-    }
+    pub fn is_capturing(&self) -> bool { self.capturing.load(std::sync::atomic::Ordering::SeqCst) }
 
     /// Begin recording all subsequent stream work into a CUDA graph (phase-1
     /// megakernel). Caller must run a NO-host-sync (all-device) sequence, then
     /// `end_capture`. THREAD_LOCAL mode scopes capture to this thread's stream.
     pub fn begin_capture(&self) -> Result<(), MetalTileError> {
         self.capturing.store(true, std::sync::atomic::Ordering::SeqCst);
-        cu_check(unsafe { cuStreamBeginCapture_v2(self.stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL) }, "cuStreamBeginCapture")
+        cu_check(
+            unsafe { cuStreamBeginCapture_v2(self.stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL) },
+            "cuStreamBeginCapture",
+        )
     }
 
     /// Finish capture → instantiate an executable graph. Replay with `graph_launch`.
     pub fn end_capture(&self) -> Result<CUgraphExec, MetalTileError> {
         let mut graph: CUgraph = ptr::null_mut();
-        let res = cu_check(unsafe { cuStreamEndCapture(self.stream, &mut graph) }, "cuStreamEndCapture");
+        let res =
+            cu_check(unsafe { cuStreamEndCapture(self.stream, &mut graph) }, "cuStreamEndCapture");
         // Clear the flag even on failure — a stuck `capturing` would make
         // every later free_raw/free_raw_pooled leak "for the capture" forever.
         self.capturing.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1547,13 +1821,21 @@ impl CudaDevice {
         if !data.is_empty() {
             cu_check(
                 unsafe {
-                    cuMemcpyHtoDAsync_v2(buf.ptr, data.as_ptr() as *const c_void, data.len(), self.stream)
+                    cuMemcpyHtoDAsync_v2(
+                        buf.ptr,
+                        data.as_ptr() as *const c_void,
+                        data.len(),
+                        self.stream,
+                    )
                 },
                 "cuMemcpyHtoDAsync(upload_padded)",
             )?;
         }
         // Sync so the pageable `data` borrow can end (same contract as upload).
-        cu_check(unsafe { cuStreamSynchronize(self.stream) }, "cuStreamSynchronize(upload_padded)")?;
+        cu_check(
+            unsafe { cuStreamSynchronize(self.stream) },
+            "cuStreamSynchronize(upload_padded)",
+        )?;
         Ok(buf)
     }
 
@@ -1754,8 +2036,12 @@ impl CudaDevice {
                     unsafe {
                         cuLaunchKernel(
                             prep.func.func,
-                            grid[0], grid[1], grid[2],
-                            block[0], block[1], block[2],
+                            grid[0],
+                            grid[1],
+                            grid[2],
+                            block[0],
+                            block[1],
+                            block[2],
                             prep.shared_bytes,
                             self.stream,
                             args.as_mut_ptr(),

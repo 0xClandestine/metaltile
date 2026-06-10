@@ -30,14 +30,26 @@
 //! - A trailing `unsigned int _n_elems` param + an `if (gtid >= _n_elems)
 //!   return;` guard replace Metal's non-uniform-threadgroup bounds model.
 
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use metaltile_core::{
     dtype::DType,
     ir::{
-        ActKind, AtomicKind, BinOpKind, Block, CoopTileAccMode, CoopTileScope, IndexExpr, Kernel,
-        KernelMode, Op, Param, ParamKind, ReduceKind, UnaryOpKind, ValueId,
+        ActKind,
+        AtomicKind,
+        BinOpKind,
+        Block,
+        CoopTileAccMode,
+        CoopTileScope,
+        IndexExpr,
+        Kernel,
+        KernelMode,
+        Op,
+        Param,
+        ParamKind,
+        ReduceKind,
+        UnaryOpKind,
+        ValueId,
     },
 };
 
@@ -160,9 +172,7 @@ impl Default for CudaGenerator {
 }
 
 impl CudaGenerator {
-    pub fn new() -> Self {
-        CudaGenerator { profile: TargetProfile::cuda() }
-    }
+    pub fn new() -> Self { CudaGenerator { profile: TargetProfile::cuda() } }
 
     /// Build a generator pinned to a specific profile (e.g. a Blackwell
     /// profile with `MmaStrategy::Tcgen05` for Phase 4).
@@ -189,7 +199,7 @@ impl CudaGenerator {
                     Some(hint) => format!("v_{hint}_{}", v.as_u32()),
                     None => format!("v{}", v.as_u32()),
                 }
-            }
+            },
             None => "/*<no-value>*/".to_string(),
         }
     }
@@ -216,7 +226,9 @@ impl CudaGenerator {
                     let terms: Vec<String> = many
                         .iter()
                         .enumerate()
-                        .map(|(d, ix)| format!("({}) * {src}_strides[{d}]", self.idx_term(ix, block, ov)))
+                        .map(|(d, ix)| {
+                            format!("({}) * {src}_strides[{d}]", self.idx_term(ix, block, ov))
+                        })
                         .collect();
                     return Ok(terms.join(" + "));
                 }
@@ -240,13 +252,13 @@ impl CudaGenerator {
                                 return Err(Error::UnsupportedOp(format!(
                                     "cuda: multi-dim index needs static dims on `{src}`"
                                 )));
-                            }
+                            },
                         }
                     }
                     terms.push(format!("({}) * {stride}u", self.idx_term(ix, block, ov)));
                 }
                 Ok(terms.join(" + "))
-            }
+            },
         }
     }
 
@@ -293,7 +305,7 @@ impl CudaGenerator {
                 } else {
                     format!("    const {ty}* __restrict__ {}", p.name)
                 })
-            }
+            },
             ParamKind::Scalar => Ok(format!("    {} {}", cuda_type_name(p.dtype), p.name)),
             // Strided tensor: data ptr + companion shape/strides buffers
             // (referenced in the IR via Load{src:"{name}_shape"/"_strides"}).
@@ -304,7 +316,7 @@ impl CudaGenerator {
                     "    {q}{ty}* __restrict__ {0},\n    const unsigned int* __restrict__ {0}_shape,\n    const unsigned int* __restrict__ {0}_strides",
                     p.name
                 ))
-            }
+            },
         }
     }
 
@@ -323,7 +335,7 @@ impl CudaGenerator {
                 // Elementwise mode it is the global linear index.
                 writeln!(out, "    const unsigned int tid = _gtid;").ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::Reduction => {
                 // The `n_simd==0 → return` freeze guard is only for the
                 // threadgroup-reduce tree (needs ≥32 threads). Kernels that
@@ -331,16 +343,28 @@ impl CudaGenerator {
                 // return — gate the guard on Op::Reduce presence.
                 let needs_guard = kernel_has_reduce(kernel);
                 self.emit_reduction_preamble(out, needs_guard);
-            }
+            },
             KernelMode::Grid3D => {
                 // 3-axis global thread id; ProgramId(axis) → gid_{x,y,z}.
                 // Same launch geometry as Metal's dispatchThreadgroups, so
                 // no extra bounds guard is needed (parity with Metal).
-                writeln!(out, "    const unsigned int gid_x = blockIdx.x * blockDim.x + threadIdx.x;").ok();
-                writeln!(out, "    const unsigned int gid_y = blockIdx.y * blockDim.y + threadIdx.y;").ok();
-                writeln!(out, "    const unsigned int gid_z = blockIdx.z * blockDim.z + threadIdx.z;").ok();
+                writeln!(
+                    out,
+                    "    const unsigned int gid_x = blockIdx.x * blockDim.x + threadIdx.x;"
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "    const unsigned int gid_y = blockIdx.y * blockDim.y + threadIdx.y;"
+                )
+                .ok();
+                writeln!(
+                    out,
+                    "    const unsigned int gid_z = blockIdx.z * blockDim.z + threadIdx.z;"
+                )
+                .ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::SimdGroup2D => {
                 // tid = threadgroup_position_in_grid (→ blockIdx),
                 // lid = thread_position_in_threadgroup (→ threadIdx).
@@ -351,20 +375,28 @@ impl CudaGenerator {
                 writeln!(out, "    const unsigned int lid_y = threadIdx.y;").ok();
                 writeln!(out, "    const unsigned int lid_z = threadIdx.z;").ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::Tile2D => {
                 return Err(Error::UnsupportedOp(
                     "cuda: KernelMode Tile2D (Op::Dot tiled-matmul path → wmma, Phase 3)".into(),
                 ));
-            }
+            },
         }
 
         // Apple simdgroup_matrix<f32,8,8> lane→element coords (from the
         // mma_layout_probe): elem 0 at (fm, fn0), elem 1 at (fm, fn1).
         if uses_simdgroup(kernel) {
             writeln!(out, "    const unsigned int _sg_qid = simd_lane / 4u;").ok();
-            writeln!(out, "    const unsigned int _sg_fm  = (_sg_qid & 4u) + ((simd_lane / 2u) % 4u);").ok();
-            writeln!(out, "    const unsigned int _sg_fn0 = (_sg_qid & 2u) * 2u + (simd_lane % 2u) * 2u;").ok();
+            writeln!(
+                out,
+                "    const unsigned int _sg_fm  = (_sg_qid & 4u) + ((simd_lane / 2u) % 4u);"
+            )
+            .ok();
+            writeln!(
+                out,
+                "    const unsigned int _sg_fn0 = (_sg_qid & 2u) * 2u + (simd_lane % 2u) * 2u;"
+            )
+            .ok();
             writeln!(out, "    const unsigned int _sg_fn1 = _sg_fn0 + 1u;").ok();
         }
 
@@ -420,7 +452,11 @@ impl CudaGenerator {
             return;
         }
         writeln!(out, "    extern __shared__ unsigned char _smem[];").ok();
-        writeln!(out, "    const unsigned int _nw = (blockDim.x * blockDim.y * blockDim.z + 31u) / 32u;").ok();
+        writeln!(
+            out,
+            "    const unsigned int _nw = (blockDim.x * blockDim.y * blockDim.z + 31u) / 32u;"
+        )
+        .ok();
         writeln!(out, "    unsigned int _so = 0u;").ok();
         for (name, ctype, count, per_warp, bytes) in &arrays {
             let wf = if *per_warp { "_nw" } else { "1u" };
@@ -454,13 +490,18 @@ impl CudaGenerator {
             for (i, op) in blk.ops.iter().enumerate() {
                 match op {
                     Op::ThreadgroupAlloc { dtype, size, name } => {
-                        v.push((name.clone(), cuda_type_name(*dtype), *size, false, dtype.size_bytes()));
-                    }
-                    Op::SimdgroupAlloc { .. } => {
+                        v.push((
+                            name.clone(),
+                            cuda_type_name(*dtype),
+                            *size,
+                            false,
+                            dtype.size_bytes(),
+                        ));
+                    },
+                    Op::SimdgroupAlloc { .. } =>
                         if let Some(Some(vid)) = blk.results.get(i) {
                             v.push((sgm_name(*vid), "float", 64, true, 4));
-                        }
-                    }
+                        },
                     Op::CoopTileSetup { name, m, n, k, exec_scope, .. } => {
                         let pw = matches!(exec_scope, CoopTileScope::SimdGroup);
                         let nm = ct_ident(name);
@@ -480,8 +521,8 @@ impl CudaGenerator {
                                 v.push((format!("_CTC_{cnm}"), "float", m * n, pw, 4));
                             }
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
         }
@@ -537,7 +578,8 @@ impl CudaGenerator {
         // hardware warps are carved from the linearised (z,y,x) order, so
         // threadIdx.x alone is wrong whenever blockDim.y/z > 1.
         writeln!(out, "    const unsigned int _ltid      = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;").ok();
-        writeln!(out, "    const unsigned int lsize      = blockDim.x * blockDim.y * blockDim.z;").ok();
+        writeln!(out, "    const unsigned int lsize      = blockDim.x * blockDim.y * blockDim.z;")
+            .ok();
         writeln!(out, "    const unsigned int n_simd     = lsize / {lw}u;").ok();
         writeln!(out, "    const unsigned int simd_lane  = _ltid % {lw}u;").ok();
         writeln!(out, "    const unsigned int simd_group = _ltid / {lw}u;").ok();
@@ -557,7 +599,8 @@ impl CudaGenerator {
         writeln!(out, "    const unsigned int tgid_x    = blockIdx.x;").ok();
         writeln!(out, "    const unsigned int tgid_y    = blockIdx.y;").ok();
         writeln!(out, "    const unsigned int tgid_z    = blockIdx.z;").ok();
-        writeln!(out, "    const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;").ok();
+        writeln!(out, "    const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;")
+            .ok();
         writeln!(out, "    const unsigned int n_simd    = lsize / {lw}u;").ok();
         if needs_guard {
             // Only the threadgroup-reduce tree needs ≥32 threads; sub-warp
@@ -585,14 +628,22 @@ impl CudaGenerator {
                     // Elementwise: the single linear thread id.
                     KernelMode::Elementwise => "_gtid".to_string(),
                     // Grid3D: per-axis global thread id.
-                    KernelMode::Grid3D => {
-                        match axis { 0 => "gid_x", 1 => "gid_y", _ => "gid_z" }.to_string()
+                    KernelMode::Grid3D => match axis {
+                        0 => "gid_x",
+                        1 => "gid_y",
+                        _ => "gid_z",
                     }
+                    .to_string(),
                     // Reduction & SimdGroup2D: which threadgroup (block) this is.
-                    _ => match axis { 0 => "tgid_x", 1 => "tgid_y", _ => "tgid_z" }.to_string(),
+                    _ => match axis {
+                        0 => "tgid_x",
+                        1 => "tgid_y",
+                        _ => "tgid_z",
+                    }
+                    .to_string(),
                 };
                 writeln!(out, "{pad}unsigned int {v} = {src};").ok();
-            }
+            },
             Op::Const { value } => {
                 let v = self.vname(vid, block, ov);
                 if *value >= 0 {
@@ -600,7 +651,7 @@ impl CudaGenerator {
                 } else {
                     writeln!(out, "{pad}int {v} = {value};").ok();
                 }
-            }
+            },
             Op::Load { src, indices, .. } => {
                 let v = self.vname(vid, block, ov);
                 // DSL builtin aliases. `simd_id` → warp index. In SimdGroup2D,
@@ -622,9 +673,10 @@ impl CudaGenerator {
                     // coalesced accesses. Requires __restrict__ on the parameter
                     // (added in emit_param). Only apply to Tensor params (not
                     // builtins like simd_id, tid_x, …).
-                    let ro_param = kernel.params.iter().find(|p| {
-                        p.name == *src && p.kind == ParamKind::Tensor && !p.is_output
-                    });
+                    let ro_param = kernel
+                        .params
+                        .iter()
+                        .find(|p| p.name == *src && p.kind == ParamKind::Tensor && !p.is_output);
                     if let Some(p) = ro_param {
                         // Cache-streaming (`__ldcs`, `.cs` hint) for the BIG read-
                         // ONCE Q4 weights (always U32-packed): they're streamed
@@ -633,7 +685,8 @@ impl CudaGenerator {
                         // `.cs` marks the line evict-first so the weight stream
                         // doesn't thrash L2. Gated by MT_LDCS_WEIGHTS (default off);
                         // activations/scales (T/f16) stay __ldg (reused across lanes).
-                        let ldcs = p.dtype == DType::U32 && std::env::var("MT_LDCS_WEIGHTS").is_ok();
+                        let ldcs =
+                            p.dtype == DType::U32 && std::env::var("MT_LDCS_WEIGHTS").is_ok();
                         if ldcs {
                             writeln!(out, "{pad}auto {v} = __ldcs(&{src}[{idx}]);").ok();
                         } else {
@@ -643,12 +696,12 @@ impl CudaGenerator {
                         writeln!(out, "{pad}auto {v} = {src}[{idx}];").ok();
                     }
                 }
-            }
+            },
             Op::Store { dst, indices, value, .. } => {
                 let val = self.vname(Some(*value), block, ov);
                 let idx = self.emit_idx(indices, block, ov, kernel, dst)?;
                 writeln!(out, "{pad}{dst}[{idx}] = {val};").ok();
-            }
+            },
             Op::BinOp { op: bop, lhs, rhs } => {
                 let v = self.vname(vid, block, ov);
                 let l = self.vname(Some(*lhs), block, ov);
@@ -664,43 +717,43 @@ impl CudaGenerator {
                 } else {
                     writeln!(out, "{pad}auto {v} = {};", cuda_binop(*bop, &l, &r)).ok();
                 }
-            }
+            },
             Op::Fma { a, b, c } => {
                 let v = self.vname(vid, block, ov);
                 let av = self.vname(Some(*a), block, ov);
                 let bv = self.vname(Some(*b), block, ov);
                 let cv = self.vname(Some(*c), block, ov);
                 writeln!(out, "{pad}auto {v} = fmaf({av}, {bv}, {cv});").ok();
-            }
+            },
             Op::UnaryOp { op: uop, value } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}auto {v} = {};", self.cuda_unary(*uop, &rv)).ok();
-            }
+            },
             Op::Cast { value, dtype } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 let ty = cuda_type_name(*dtype);
                 // CUDA C-style cast; source type comes from `auto` inference.
                 writeln!(out, "{pad}{ty} {v} = ({ty})({rv});").ok();
-            }
+            },
             Op::Select { cond, on_true, on_false } => {
                 let v = self.vname(vid, block, ov);
                 let c = self.vname(Some(*cond), block, ov);
                 let a = self.vname(Some(*on_true), block, ov);
                 let b = self.vname(Some(*on_false), block, ov);
                 writeln!(out, "{pad}auto {v} = ({c}) ? ({a}) : ({b});").ok();
-            }
+            },
             // Mutable locals: the macro lowers `let mut x` to DeclareLocal and
             // reads to Load{src:"__ml_x"} (body.rs), so the names line up.
             Op::DeclareLocal { name, value } => {
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}auto __ml_{name} = {rv};").ok();
-            }
+            },
             Op::SetLocal { name, value } => {
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}__ml_{name} = {rv};").ok();
-            }
+            },
             Op::Activation { kind, value } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -712,7 +765,7 @@ impl CudaGenerator {
                     ActKind::Tanh => format!("tanhf((float)({rv}))"),
                 };
                 writeln!(out, "{pad}auto {v} = {expr};").ok();
-            }
+            },
             // Single-warp SIMD reduction → xor butterfly so ALL lanes get
             // the result (matches Metal `simd_*` broadcast semantics).
             //
@@ -737,7 +790,8 @@ impl CudaGenerator {
                     // different rounding path than the CPU oracle uses).
                     writeln!(out, "{pad}    volatile float _s = 0.0f;").ok();
                     writeln!(out, "{pad}    for (int _i = 0; _i < {lw}; _i++) {{").ok();
-                    writeln!(out, "{pad}        _s = _s + __shfl_sync(0xffffffffu, _src, _i);").ok();
+                    writeln!(out, "{pad}        _s = _s + __shfl_sync(0xffffffffu, _src, _i);")
+                        .ok();
                     writeln!(out, "{pad}    }}").ok();
                     if *rk == ReduceKind::Mean {
                         writeln!(out, "{pad}    {v} = _s / {lw}.0f;").ok();
@@ -751,7 +805,8 @@ impl CudaGenerator {
                     writeln!(out, "{pad}{{").ok();
                     writeln!(out, "{pad}    float _s = (float)({rv});").ok();
                     writeln!(out, "{pad}    for (int _o = {half}; _o > 0; _o >>= 1) {{").ok();
-                    writeln!(out, "{pad}        float _x = __shfl_xor_sync(0xffffffffu, _s, _o);").ok();
+                    writeln!(out, "{pad}        float _x = __shfl_xor_sync(0xffffffffu, _s, _o);")
+                        .ok();
                     writeln!(out, "{pad}        _s = {};", reduce_combine(*rk, "_s", "_x")).ok();
                     writeln!(out, "{pad}    }}").ok();
                     if *rk == ReduceKind::Mean {
@@ -761,7 +816,7 @@ impl CudaGenerator {
                     }
                     writeln!(out, "{pad}}}").ok();
                 }
-            }
+            },
             // Warp prefix scan (Hillis-Steele via __shfl_up_sync), matching
             // Metal's simd_prefix_{inclusive,exclusive}_*.
             Op::SimdScan { value, op: rk, exclusive } => {
@@ -773,33 +828,51 @@ impl CudaGenerator {
                 writeln!(out, "{pad}    float _s = (float)({rv});").ok();
                 writeln!(out, "{pad}    for (int _o = 1; _o < {lw}; _o <<= 1) {{").ok();
                 writeln!(out, "{pad}        float _t = __shfl_up_sync(0xffffffffu, _s, _o);").ok();
-                writeln!(out, "{pad}        if (simd_lane >= (unsigned int)_o) _s = {};", reduce_combine(*rk, "_s", "_t")).ok();
+                writeln!(
+                    out,
+                    "{pad}        if (simd_lane >= (unsigned int)_o) _s = {};",
+                    reduce_combine(*rk, "_s", "_t")
+                )
+                .ok();
                 writeln!(out, "{pad}    }}").ok();
                 if *exclusive {
                     // Shift right one lane; lane 0 gets the identity.
                     writeln!(out, "{pad}    float _x = __shfl_up_sync(0xffffffffu, _s, 1);").ok();
-                    writeln!(out, "{pad}    {v} = (simd_lane == 0u) ? ({}) : _x;", reduce_init(*rk)).ok();
+                    writeln!(
+                        out,
+                        "{pad}    {v} = (simd_lane == 0u) ? ({}) : _x;",
+                        reduce_init(*rk)
+                    )
+                    .ok();
                 } else {
                     writeln!(out, "{pad}    {v} = _s;").ok();
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // Scalar (rank-0) splat / zeros. Tile (array) shapes need the
             // threadgroup/stack allocation path (cooperative kernels, P3+).
             Op::Zeros { shape, .. } if shape.rank() == 0 => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}float {v} = 0.0f;").ok();
-            }
+            },
             Op::Splat { value, shape, .. } if shape.rank() == 0 => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}float {v} = {};", fmt_f32_lit(*value)).ok();
-            }
+            },
             // Per-thread grid-stride accumulation over a row (Phase 2).
             // Each thread sums src[offset+tid], src[offset+tid+lsize], …
             // Correctness-first: the 4-wide vectorized form the MSL path uses
             // is a Phase-3 perf retune (SCOPE §6).
             Op::StrideReduce {
-                src, offset, stride, end, op: rk, transform, secondary_src, secondary_base, ..
+                src,
+                offset,
+                stride,
+                end,
+                op: rk,
+                transform,
+                secondary_src,
+                secondary_base,
+                ..
             } => {
                 let v = self.vname(vid, block, ov);
                 let off = self.vname(Some(*offset), block, ov);
@@ -823,7 +896,7 @@ impl CudaGenerator {
                     Some(sec) => {
                         let bv = self.vname(*secondary_base, block, ov);
                         format!("(float)({src}[_i]) * (float)({sec}[_i - {bv}])")
-                    }
+                    },
                     None => format!("(float)({src}[_i])"),
                 };
                 // Per-element transform chain (e.g. square for sum-of-squares,
@@ -844,7 +917,7 @@ impl CudaGenerator {
                                 },
                                 Op::Cast { dtype, .. } => {
                                     format!("({})({e})", cuda_type_name(*dtype))
-                                }
+                                },
                                 Op::BinOp { op, rhs, .. } => {
                                     let rv = self.vname(Some(*rhs), block, ov);
                                     match op {
@@ -854,23 +927,20 @@ impl CudaGenerator {
                                         BinOpKind::Div => format!("(({e}) / (float)({rv}))"),
                                         _ => e,
                                     }
-                                }
+                                },
                                 _ => e,
                             };
                         }
                         e
-                    }
+                    },
                 };
                 writeln!(out, "{pad}float {v} = {};", reduce_init(*rk)).ok();
-                writeln!(
-                    out,
-                    "{pad}for (unsigned int _i = {start}; _i < {en}; _i += {step}) {{"
-                )
-                .ok();
+                writeln!(out, "{pad}for (unsigned int _i = {start}; _i < {en}; _i += {step}) {{")
+                    .ok();
                 writeln!(out, "{pad}    float _e = {elem_expr};").ok();
                 writeln!(out, "{pad}    {v} = {};", reduce_combine(*rk, &v, "_e")).ok();
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // Threadgroup-scope reduction: warp shuffle + shared-mem tree
             // (the CUDA analog of msl::reduce two-level simd_sum). Phase 2.
             Op::Reduce { value, axis, op: rk } => {
@@ -882,43 +952,42 @@ impl CudaGenerator {
                 let v = self.vname(vid, block, ov);
                 let input = self.vname(Some(*value), block, ov);
                 self.emit_reduce_tree(&v, &input, *rk, out);
-            }
+            },
             // ── Threadgroup / warp primitives (non-MMA) ────────────────
             // Allocs are hoisted by emit_allocs; the ops themselves are no-ops.
-            Op::ThreadgroupAlloc { .. } | Op::StackAlloc { .. } => {}
+            Op::ThreadgroupAlloc { .. } | Op::StackAlloc { .. } => {},
             Op::ThreadgroupLoad { name, index } | Op::StackLoad { name, index } => {
                 let v = self.vname(vid, block, ov);
                 let iv = self.vname(Some(*index), block, ov);
                 writeln!(out, "{pad}auto {v} = {name}[{iv}];").ok();
-            }
-            Op::ThreadgroupStore { name, index, value }
-            | Op::StackStore { name, index, value } => {
+            },
+            Op::ThreadgroupStore { name, index, value } | Op::StackStore { name, index, value } => {
                 let iv = self.vname(Some(*index), block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}{name}[{iv}] = {rv};").ok();
-            }
+            },
             Op::SimdLaneId => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}unsigned int {v} = simd_lane;").ok();
-            }
+            },
             Op::SimdGroupId => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}unsigned int {v} = simd_group;").ok();
-            }
+            },
             Op::SimdBroadcast { value, lane } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 let rl = self.vname(Some(*lane), block, ov);
                 writeln!(out, "{pad}auto {v} = __shfl_sync(0xffffffffu, {rv}, {rl});").ok();
-            }
+            },
             Op::SimdShuffleXor { value, mask } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}auto {v} = __shfl_xor_sync(0xffffffffu, {rv}, {mask}u);").ok();
-            }
+            },
             Op::Barrier => {
                 writeln!(out, "{pad}__syncthreads();").ok();
-            }
+            },
             Op::Atomic { op: ak, dst, index, value, .. } => {
                 let iv = self.vname(Some(*index), block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -931,27 +1000,27 @@ impl CudaGenerator {
                     AtomicKind::Xor => "atomicXor",
                 };
                 writeln!(out, "{pad}{f}(&{dst}[{iv}], {rv});").ok();
-            }
+            },
             Op::SimdgroupBarrier => {
                 writeln!(out, "{pad}__syncwarp();").ok();
-            }
+            },
             // ── simdgroup_matrix<f32,8,8> (software emulation) ─────────
             // Each fragment is a per-warp 8×8 row-major shared tile; lanes
             // map to elements via the Apple layout (_sg_fm/_sg_fn0/_sg_fn1).
             // Cooperative across the 32-lane warp = 32-lane simdgroup.
-            Op::SimdgroupAlloc { .. } => {} // declared+zeroed in emit_allocs
+            Op::SimdgroupAlloc { .. } => {}, // declared+zeroed in emit_allocs
             Op::SimdgroupElemLoad { value, index } => {
                 let v = self.vname(vid, block, ov);
                 let m = sgm_name(*value);
                 let fnk = if *index == 0 { "_sg_fn0" } else { "_sg_fn1" };
                 writeln!(out, "{pad}float {v} = {m}[simd_group * 64u + _sg_fm * 8u + {fnk}];").ok();
-            }
+            },
             Op::SimdgroupElemStore { value, index, data } => {
                 let m = sgm_name(*value);
                 let dv = self.vname(Some(*data), block, ov);
                 let fnk = if *index == 0 { "_sg_fn0" } else { "_sg_fn1" };
                 writeln!(out, "{pad}{m}[simd_group * 64u + _sg_fm * 8u + {fnk}] = {dv};").ok();
-            }
+            },
             // Cooperative fragment load from a threadgroup array, one row per
             // (fm,fn): dest[fm][fn] = tg[off + (transpose ? fn*stride+fm : fm*stride+fn)].
             Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
@@ -967,10 +1036,11 @@ impl CudaGenerator {
                     writeln!(
                         out,
                         "{pad}    {m}[_base + _sg_fm * 8u + {fnk}] = (float)({tg}[{off} + {idx}]);"
-                    ).ok();
+                    )
+                    .ok();
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // C += A * B  (8×8×8), cooperative across the warp.
             Op::SimdgroupMatMul { a, b, c } => {
                 let (ma, mb, mc) = (sgm_name(*a), sgm_name(*b), sgm_name(*c));
@@ -987,20 +1057,19 @@ impl CudaGenerator {
                 writeln!(out, "{pad}    {mc}[_bs + _sg_fm * 8u + _sg_fn0] = _acc0;").ok();
                 writeln!(out, "{pad}    {mc}[_bs + _sg_fm * 8u + _sg_fn1] = _acc1;").ok();
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // ── CoopTile cooperative GEMM (MPP/NAX → software emulation) ──
             // Opaque tiles (Load→Run→Store, no element access) → staged in
             // shared memory with a self-consistent row-major layout. C
             // persists across K-block Run calls (accumulate mode).
-            Op::CoopTileSetup { .. } => {} // tiles declared in emit_allocs
+            Op::CoopTileSetup { .. } => {}, // tiles declared in emit_allocs
             Op::CoopTileZero { name } => {
-                let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name)
-                    .ok_or_else(|| Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup")))?;
+                let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name).ok_or_else(|| {
+                    Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup"))
+                })?;
                 let cnm = ct_ident(&coop_c_name(name));
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     // Lane-local C: each lane zeros its own slots.
                     let lw = self.profile.lane_width;
@@ -1015,18 +1084,22 @@ impl CudaGenerator {
                     let base = coop_base(simd, m * n);
                     writeln!(out, "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) _CTC_{cnm}[{base} + _e] = 0.0f;", m * n).ok();
                 }
-            }
+            },
             // Per Apple MPP headers: metal::extents<int, EI, EO> is {inner,
             // outer}; with tensor_inline the leading-dim stride ld == EI (the
             // inner extent), and the *descriptor flag* (ta/tb) — not the
             // extents — chooses transpose. So stride = ei always.
             Op::CoopTileLoadA { name, ptr_name, ptr_offset, dtype: _, ei, .. } => {
-                let (m, _, k, ta, _, _, _, simd) = self.coop_cfg(kernel, name)
-                    .ok_or_else(|| Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup")))?;
+                let (m, _, k, ta, _, _, _, simd) =
+                    self.coop_cfg(kernel, name).ok_or_else(|| {
+                        Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup"))
+                    })?;
                 let nm = ct_ident(name);
                 let (sid, ssize, _) = coop_scope(simd);
                 let base = coop_base(simd, m * k);
-                let off = ptr_offset.map(|o| self.vname(Some(o), block, ov)).unwrap_or_else(|| "0".into());
+                let off = ptr_offset
+                    .map(|o| self.vname(Some(o), block, ov))
+                    .unwrap_or_else(|| "0".into());
                 // A is m×k, leading dim ei. ta=false: ptr[i*ei+j]; ta=true:
                 // memory is k×m → ptr[j*ei+i]. (i=_e/k row, j=_e%k col.)
                 let src = if ta {
@@ -1036,14 +1109,18 @@ impl CudaGenerator {
                 };
                 writeln!(out, "{pad}__syncthreads();").ok();
                 writeln!(out, "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) _CTA_{nm}[{base} + _e] = (float)({ptr_name}[{off} + {src}]);", m * k).ok();
-            }
+            },
             Op::CoopTileLoadB { name, ptr_name, ptr_offset, dtype: _, ei, .. } => {
-                let (_, n, k, _, tb, _, _, simd) = self.coop_cfg(kernel, name)
-                    .ok_or_else(|| Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup")))?;
+                let (_, n, k, _, tb, _, _, simd) =
+                    self.coop_cfg(kernel, name).ok_or_else(|| {
+                        Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup"))
+                    })?;
                 let nm = ct_ident(name);
                 let (sid, ssize, _) = coop_scope(simd);
                 let base = coop_base(simd, k * n);
-                let off = ptr_offset.map(|o| self.vname(Some(o), block, ov)).unwrap_or_else(|| "0".into());
+                let off = ptr_offset
+                    .map(|o| self.vname(Some(o), block, ov))
+                    .unwrap_or_else(|| "0".into());
                 // B is k×n, leading dim ei. tb=false: ptr[i*ei+j]; tb=true:
                 // memory is n×k → ptr[j*ei+i]. (i=_e/n row, j=_e%n col.)
                 let src = if tb {
@@ -1052,16 +1129,16 @@ impl CudaGenerator {
                     format!("(_e / {n}u) * {ei}u + (_e % {n}u)")
                 };
                 writeln!(out, "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) _CTB_{nm}[{base} + _e] = (float)({ptr_name}[{off} + {src}]);", k * n).ok();
-            }
+            },
             Op::CoopTileRun { name, .. } => {
-                let (m, n, k, _, _, _, accum, simd) = self.coop_cfg(kernel, name)
-                    .ok_or_else(|| Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup")))?;
+                let (m, n, k, _, _, _, accum, simd) =
+                    self.coop_cfg(kernel, name).ok_or_else(|| {
+                        Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup"))
+                    })?;
                 let nm = ct_ident(name);
                 let cnm = ct_ident(&coop_c_name(name));
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     // SoftwareLocalC: per-warp lane-local C. Each lane
                     // walks its own `m*n/lw` slots, computing the same
@@ -1069,57 +1146,66 @@ impl CudaGenerator {
                     // form. A and B remain shared per-warp.
                     let lw = self.profile.lane_width;
                     let per_lane = (m * n).div_ceil(lw).max(1);
-                    let ba = coop_base(true, m * k);
-                    let bb = coop_base(true, k * n);
+                    let base_a = coop_base(true, m * k);
+                    let base_b = coop_base(true, k * n);
                     writeln!(out, "{pad}__syncthreads();").ok();
-                    writeln!(out, "{pad}for (unsigned int _li = 0u; _li < {per_lane}u; _li++) {{").ok();
+                    writeln!(out, "{pad}for (unsigned int _li = 0u; _li < {per_lane}u; _li++) {{")
+                        .ok();
                     writeln!(out, "{pad}    unsigned int _e = simd_lane + _li * {lw}u;").ok();
                     writeln!(out, "{pad}    if (_e >= {}u) break;", m * n).ok();
                     writeln!(out, "{pad}    unsigned int _i = _e / {n}u, _j = _e % {n}u;").ok();
-                    let init = if accum {
-                        format!("_CTC_lane_{cnm}[_li]")
-                    } else {
-                        "0.0f".to_string()
-                    };
+                    let init =
+                        if accum { format!("_CTC_lane_{cnm}[_li]") } else { "0.0f".to_string() };
                     writeln!(out, "{pad}    float _acc = {init};").ok();
-                    writeln!(out, "{pad}    for (unsigned int _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{ba} + _i * {k}u + _l] * _CTB_{nm}[{bb} + _l * {n}u + _j];").ok();
+                    writeln!(out, "{pad}    for (unsigned int _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{base_a} + _i * {k}u + _l] * _CTB_{nm}[{base_b} + _l * {n}u + _j];").ok();
                     writeln!(out, "{pad}    _CTC_lane_{cnm}[_li] = _acc;").ok();
                     writeln!(out, "{pad}}}").ok();
                     writeln!(out, "{pad}__syncthreads();").ok();
                 } else {
                     let (sid, ssize, _) = coop_scope(simd);
-                    let (ba, bb, bc) =
+                    let (base_a, base_b, bc) =
                         (coop_base(simd, m * k), coop_base(simd, k * n), coop_base(simd, m * n));
                     writeln!(out, "{pad}__syncthreads();").ok();
-                    writeln!(out, "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) {{", m * n).ok();
+                    writeln!(
+                        out,
+                        "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) {{",
+                        m * n
+                    )
+                    .ok();
                     writeln!(out, "{pad}    unsigned int _i = _e / {n}u, _j = _e % {n}u;").ok();
                     let init = if accum { format!("_CTC_{cnm}[{bc} + _e]") } else { "0.0f".into() };
                     writeln!(out, "{pad}    float _acc = {init};").ok();
-                    writeln!(out, "{pad}    for (unsigned int _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{ba} + _i * {k}u + _l] * _CTB_{nm}[{bb} + _l * {n}u + _j];").ok();
+                    writeln!(out, "{pad}    for (unsigned int _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{base_a} + _i * {k}u + _l] * _CTB_{nm}[{base_b} + _l * {n}u + _j];").ok();
                     writeln!(out, "{pad}    _CTC_{cnm}[{bc} + _e] = _acc;").ok();
                     writeln!(out, "{pad}}}").ok();
                     writeln!(out, "{pad}__syncthreads();").ok();
                 }
-            }
+            },
             Op::CoopTileStoreC { name, ptr_name, ptr_offset, dtype, ei, .. } => {
-                let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name)
-                    .ok_or_else(|| Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup")))?;
+                let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name).ok_or_else(|| {
+                    Error::UnsupportedOp(format!("cuda: CoopTile `{name}` no Setup"))
+                })?;
                 let cnm = ct_ident(&coop_c_name(name));
-                let off = ptr_offset.map(|o| self.vname(Some(o), block, ov)).unwrap_or_else(|| "0".into());
+                let off = ptr_offset
+                    .map(|o| self.vname(Some(o), block, ov))
+                    .unwrap_or_else(|| "0".into());
                 let ty = cuda_type_name(*dtype);
                 let dst = format!("(_e / {n}u) * {ei}u + (_e % {n}u)");
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     let lw = self.profile.lane_width;
                     let per_lane = (m * n).div_ceil(lw).max(1);
                     writeln!(out, "{pad}__syncthreads();").ok();
-                    writeln!(out, "{pad}for (unsigned int _li = 0u; _li < {per_lane}u; _li++) {{").ok();
+                    writeln!(out, "{pad}for (unsigned int _li = 0u; _li < {per_lane}u; _li++) {{")
+                        .ok();
                     writeln!(out, "{pad}    unsigned int _e = simd_lane + _li * {lw}u;").ok();
                     writeln!(out, "{pad}    if (_e >= {}u) break;", m * n).ok();
-                    writeln!(out, "{pad}    {ptr_name}[{off} + {dst}] = ({ty})(_CTC_lane_{cnm}[_li]);").ok();
+                    writeln!(
+                        out,
+                        "{pad}    {ptr_name}[{off} + {dst}] = ({ty})(_CTC_lane_{cnm}[_li]);"
+                    )
+                    .ok();
                     writeln!(out, "{pad}}}").ok();
                 } else {
                     let (sid, ssize, _) = coop_scope(simd);
@@ -1128,24 +1214,25 @@ impl CudaGenerator {
                     writeln!(out, "{pad}__syncthreads();").ok();
                     writeln!(out, "{pad}for (unsigned int _e = {sid}; _e < {}u; _e += {ssize}) {ptr_name}[{off} + {dst}] = ({ty})(_CTC_{cnm}[{base} + _e]);", m * n).ok();
                 }
-            }
+            },
             // ── Control flow (nested-block recursion) ──────────────────
             Op::Loop { var, start, end, step, body } => {
                 let s = self.vname(Some(*start), block, ov);
                 let e = self.vname(Some(*end), block, ov);
                 let st = self.vname(Some(*step), block, ov);
                 let lv = format!("i_{}", var.as_u32());
-                writeln!(out, "{pad}for (unsigned int {lv} = {s}; {lv} < {e}; {lv} += {st}) {{").ok();
-                if let Some(bb) = kernel.blocks.get(body) {
+                writeln!(out, "{pad}for (unsigned int {lv} = {s}; {lv} < {e}; {lv} += {st}) {{")
+                    .ok();
+                if let Some(base_b) = kernel.blocks.get(body) {
                     let mut child = self.child_ov(block, ov);
                     // The loop induction var is referenced inside the body by
                     // two macro-assigned magic ValueIds (see msl emit_block).
                     child.insert(ValueId::new(0xC000_0000 | var.as_u32()), lv.clone());
                     child.insert(ValueId::new(var.as_u32() + 0x4000_0000), lv.clone());
-                    self.emit_ops(bb, kernel, &child, out)?;
+                    self.emit_ops(base_b, kernel, &child, out)?;
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             Op::If { cond, then_block, else_block } => {
                 let c = self.vname(Some(*cond), block, ov);
                 writeln!(out, "{pad}if ({c}) {{").ok();
@@ -1161,13 +1248,13 @@ impl CudaGenerator {
                     }
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             other => {
                 return Err(Error::UnsupportedOp(format!(
                     "cuda: op {} not supported yet",
                     op_variant_name(other)
                 )));
-            }
+            },
         }
         Ok(())
     }
@@ -1198,7 +1285,8 @@ impl CudaGenerator {
         writeln!(out, "{pad}    __syncthreads();").ok();
         // Phase 3: warp 0 reduces the per-warp totals and broadcasts via [0].
         writeln!(out, "{pad}    if (simd_group == 0u) {{").ok();
-        writeln!(out, "{pad}        float _wv = simd_lane < n_simd ? {buf}[simd_lane] : {init};").ok();
+        writeln!(out, "{pad}        float _wv = simd_lane < n_simd ? {buf}[simd_lane] : {init};")
+            .ok();
         writeln!(out, "{pad}        for (int _o = {half}; _o > 0; _o >>= 1) {{").ok();
         writeln!(out, "{pad}            float _ov = __shfl_down_sync(0xffffffffu, _wv, _o);").ok();
         writeln!(out, "{pad}            _wv = {};", reduce_combine(kind, "_wv", "_ov")).ok();
@@ -1229,12 +1317,26 @@ impl CudaGenerator {
         for blk in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
             for op in &blk.ops {
                 if let Op::CoopTileSetup {
-                    name: nm, m, n, k, ta, tb, tc, acc_mode, exec_scope, ..
+                    name: nm,
+                    m,
+                    n,
+                    k,
+                    ta,
+                    tb,
+                    tc,
+                    acc_mode,
+                    exec_scope,
+                    ..
                 } = op
                 {
                     if nm == name {
                         return Some((
-                            *m, *n, *k, *ta, *tb, *tc,
+                            *m,
+                            *n,
+                            *k,
+                            *ta,
+                            *tb,
+                            *tc,
                             matches!(acc_mode, CoopTileAccMode::MultiplyAccumulate),
                             matches!(exec_scope, CoopTileScope::SimdGroup),
                         ));
@@ -1258,7 +1360,7 @@ impl CudaGenerator {
                 Rsqrt => return format!("mt_rsqrt((float)({arg}))"),
                 Exp => return format!("mt_expf((float)({arg}))"),
                 Log => return format!("mt_logf((float)({arg}))"),
-                _ => {}
+                _ => {},
             }
         }
         match op {
@@ -1266,7 +1368,8 @@ impl CudaGenerator {
             Recip => format!("(1.0f / {arg})"),
             // sign(x): -1/0/+1 (matches Metal `sign`, incl. 0 → 0).
             // `copysignf` would map 0 → +1, so emit the explicit form.
-            Sign => format!("((float)({arg}) > 0.0f ? 1.0f : ((float)({arg}) < 0.0f ? -1.0f : 0.0f))"),
+            Sign =>
+                format!("((float)({arg}) > 0.0f ? 1.0f : ((float)({arg}) < 0.0f ? -1.0f : 0.0f))"),
             // Block-scaled-quant decode helpers (preamble __device__ fns).
             _ => format!("{}({arg})", self.profile.unary_intrinsic(op)),
         }
@@ -1283,10 +1386,9 @@ impl CodegenBackend for CudaGenerator {
         // inline pass. Non-call kernels are unaffected; on failure we fall
         // back to the raw IR.
         let mut inlined = kernel.clone();
-        let k: &Kernel = match crate::passes::run_passes(
-            &mut inlined,
-            &[Box::new(crate::passes::kernel_inline::KernelInlinePass)],
-        ) {
+        let k: &Kernel = match crate::passes::run_passes(&mut inlined, &[Box::new(
+            crate::passes::kernel_inline::KernelInlinePass,
+        )]) {
             Ok(()) => &inlined,
             Err(_) => kernel,
         };
@@ -1361,11 +1463,7 @@ fn fmt_f32_lit(v: f64) -> String {
         }
         return if v > 0.0 { "MT_INF".to_string() } else { "(-MT_INF)".to_string() };
     }
-    if v.fract() == 0.0 {
-        format!("{v:.1}f")
-    } else {
-        format!("{v}f")
-    }
+    if v.fract() == 0.0 { format!("{v:.1}f") } else { format!("{v}f") }
 }
 
 /// Identity / initial accumulator value for a reduction kind.
@@ -1402,9 +1500,7 @@ fn sgm_name(v: ValueId) -> String { format!("_SGM_{}", v.as_u32()) }
 /// The C-accumulator group name for a CoopTile setup: a `*_acc`
 /// (multiply-accumulate) setup shares its C tile with the base setup
 /// (e.g. `qk_acc` accumulates onto `qk`'s C across head_dim chunks).
-fn coop_c_name(name: &str) -> String {
-    name.strip_suffix("_acc").unwrap_or(name).to_string()
-}
+fn coop_c_name(name: &str) -> String { name.strip_suffix("_acc").unwrap_or(name).to_string() }
 
 /// Sanitize a CoopTile name into a valid C identifier suffix.
 fn ct_ident(name: &str) -> String {
@@ -1446,8 +1542,10 @@ fn op_variant_name(op: &Op) -> String {
 
 #[cfg(test)]
 mod tests {
-    use metaltile_core::ir::{BinOpKind, IndexExpr, Op};
-    use metaltile_core::shape::Shape;
+    use metaltile_core::{
+        ir::{BinOpKind, IndexExpr, Op},
+        shape::Shape,
+    };
 
     use super::*;
 
@@ -1466,12 +1564,22 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.name_value(ValueId::new(0), "idx");
         k.body.push_op(
-            Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "a".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(1),
         );
         k.body.name_value(ValueId::new(1), "x");
         k.body.push_op(
-            Op::Load { src: "b".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "b".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(2),
         );
         k.body.name_value(ValueId::new(2), "y");
@@ -1514,12 +1622,18 @@ mod tests {
         let mut k = Kernel::new("row_reduce_sum");
         k.mode = KernelMode::Reduction;
         k.params.push(Param {
-            name: "inp".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: false, kind: ParamKind::Tensor,
+            name: "inp".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor,
         });
         k.params.push(Param {
-            name: "out".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: true, kind: ParamKind::Tensor,
+            name: "out".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: ParamKind::Tensor,
         });
         k.constexprs.push(metaltile_core::ir::ConstExprDecl {
             name: metaltile_core::constexpr::ConstExpr::new("n"),
@@ -1527,8 +1641,12 @@ mod tests {
             value: None,
         });
         let (row, nv, rs, re, acc, res) = (
-            ValueId::new(0), ValueId::new(1), ValueId::new(2),
-            ValueId::new(3), ValueId::new(4), ValueId::new(5),
+            ValueId::new(0),
+            ValueId::new(1),
+            ValueId::new(2),
+            ValueId::new(3),
+            ValueId::new(4),
+            ValueId::new(5),
         );
         k.body.push_op(Op::ProgramId { axis: 0 }, row);
         k.body.name_value(row, "row");
@@ -1539,9 +1657,15 @@ mod tests {
         k.body.name_value(re, "re");
         k.body.push_op(
             Op::StrideReduce {
-                src: "inp".into(), offset: rs, stride: nv, end: re,
-                op: ReduceKind::Sum, dtype: DType::F32,
-                transform: None, secondary_src: None, secondary_base: None,
+                src: "inp".into(),
+                offset: rs,
+                stride: nv,
+                end: re,
+                op: ReduceKind::Sum,
+                dtype: DType::F32,
+                transform: None,
+                secondary_src: None,
+                secondary_base: None,
             },
             acc,
         );
@@ -1549,7 +1673,10 @@ mod tests {
         k.body.push_op(Op::Reduce { value: acc, axis: 0, op: ReduceKind::Sum }, res);
         k.body.name_value(res, "result");
         k.body.push_op_no_result(Op::Store {
-            dst: "out".into(), indices: vec![IndexExpr::Value(row)], value: res, mask: None,
+            dst: "out".into(),
+            indices: vec![IndexExpr::Value(row)],
+            value: res,
+            mask: None,
         });
         k
     }
@@ -1565,7 +1692,9 @@ mod tests {
         // flattened in-block thread index).
         assert!(src.contains("const unsigned int tgid_x    = blockIdx.x;"));
         assert!(src.contains("const unsigned int _ltid     = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;"));
-        assert!(src.contains("const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;"));
+        assert!(
+            src.contains("const unsigned int lsize     = blockDim.x * blockDim.y * blockDim.z;")
+        );
         assert!(src.contains("const unsigned int n_simd    = lsize / 32u;"));
         assert!(src.contains("const unsigned int simd_lane  = _ltid % 32u;"));
         // Per-thread grid-stride accumulation.

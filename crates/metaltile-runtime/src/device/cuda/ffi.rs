@@ -63,7 +63,12 @@ unsafe extern "C" {
     // cuMemcpyHtoD is always synchronous; pinned + Async is not).
     pub fn cuMemAllocHost_v2(pp: *mut *mut c_void, bytesize: usize) -> CUresult;
     pub fn cuMemFreeHost(p: *mut c_void) -> CUresult;
-    pub fn cuMemcpyHtoDAsync_v2(dst: CUdeviceptr, src: *const c_void, byte_count: usize, stream: CUstream) -> CUresult;
+    pub fn cuMemcpyHtoDAsync_v2(
+        dst: CUdeviceptr,
+        src: *const c_void,
+        byte_count: usize,
+        stream: CUstream,
+    ) -> CUresult;
     pub fn cuMemsetD8Async(dst: CUdeviceptr, uc: u8, n: usize, stream: CUstream) -> CUresult;
     #[allow(clippy::too_many_arguments)]
     pub fn cuLaunchKernel(
@@ -101,11 +106,7 @@ unsafe extern "C" {
     pub fn cuEventCreate(phEvent: *mut CUevent, flags: c_uint) -> CUresult;
     pub fn cuEventRecord(hEvent: CUevent, hStream: CUstream) -> CUresult;
     pub fn cuEventSynchronize(hEvent: CUevent) -> CUresult;
-    pub fn cuEventElapsedTime(
-        pMilliseconds: *mut f32,
-        hStart: CUevent,
-        hEnd: CUevent,
-    ) -> CUresult;
+    pub fn cuEventElapsedTime(pMilliseconds: *mut f32, hStart: CUevent, hEnd: CUevent) -> CUresult;
     pub fn cuEventDestroy_v2(hEvent: CUevent) -> CUresult;
     // ── Stream + CUDA-graph capture (replay a whole decode token as ONE graph
     // launch, eliminating the ~390 per-kernel launch/host-orchestration costs). ──
@@ -183,7 +184,11 @@ unsafe extern "C" {
     pub fn cublasSetStream_v2(handle: cublasHandle_t, stream: CUstream) -> cublasStatus_t;
     /// Persistent workspace so cuBLAS GEMMs are CUDA-graph capture/replay-safe (the
     /// default workspace is a transient per-call alloc → replay reads freed memory).
-    pub fn cublasSetWorkspace_v2(handle: cublasHandle_t, workspace: *mut c_void, workspace_bytes: usize) -> cublasStatus_t;
+    pub fn cublasSetWorkspace_v2(
+        handle: cublasHandle_t,
+        workspace: *mut c_void,
+        workspace_bytes: usize,
+    ) -> cublasStatus_t;
     /// Allow/forbid atomic-accumulation kernels (split-K). Forbidding → deterministic.
     pub fn cublasSetAtomicsMode(handle: cublasHandle_t, mode: c_int) -> cublasStatus_t;
     pub fn cublasSetMathMode(handle: cublasHandle_t, mode: c_int) -> cublasStatus_t;
@@ -326,7 +331,7 @@ pub const CUBLASLT_REDUCTION_SCHEME_NONE: u32 = 0;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct cublasLtMatmulHeuristicResult_t {
-    pub algo: [u64; 8],        // cublasLtMatmulAlgo_t
+    pub algo: [u64; 8], // cublasLtMatmulAlgo_t
     pub workspace_size: usize,
     pub state: cublasStatus_t,
     pub waves_count: f32,
@@ -335,7 +340,11 @@ pub struct cublasLtMatmulHeuristicResult_t {
 impl Default for cublasLtMatmulHeuristicResult_t {
     fn default() -> Self {
         cublasLtMatmulHeuristicResult_t {
-            algo: [0; 8], workspace_size: 0, state: 0, waves_count: 0.0, reserved: [0; 4],
+            algo: [0; 8],
+            workspace_size: 0,
+            state: 0,
+            waves_count: 0.0,
+            reserved: [0; 4],
         }
     }
 }
@@ -344,15 +353,40 @@ impl Default for cublasLtMatmulHeuristicResult_t {
 unsafe extern "C" {
     pub fn cublasLtCreate(handle: *mut cublasLtHandle_t) -> cublasStatus_t;
     pub fn cublasLtDestroy(handle: cublasLtHandle_t) -> cublasStatus_t;
-    pub fn cublasLtMatmulDescCreate(desc: *mut cublasLtMatmulDesc_t, compute_type: c_int, scale_type: c_int) -> cublasStatus_t;
+    pub fn cublasLtMatmulDescCreate(
+        desc: *mut cublasLtMatmulDesc_t,
+        compute_type: c_int,
+        scale_type: c_int,
+    ) -> cublasStatus_t;
     pub fn cublasLtMatmulDescDestroy(desc: cublasLtMatmulDesc_t) -> cublasStatus_t;
-    pub fn cublasLtMatmulDescSetAttribute(desc: cublasLtMatmulDesc_t, attr: c_int, buf: *const c_void, size: usize) -> cublasStatus_t;
-    pub fn cublasLtMatrixLayoutCreate(layout: *mut cublasLtMatrixLayout_t, dtype: c_int, rows: u64, cols: u64, ld: i64) -> cublasStatus_t;
-    pub fn cublasLtMatrixLayoutSetAttribute(layout: cublasLtMatrixLayout_t, attr: c_int, buf: *const c_void, size: usize) -> cublasStatus_t;
+    pub fn cublasLtMatmulDescSetAttribute(
+        desc: cublasLtMatmulDesc_t,
+        attr: c_int,
+        buf: *const c_void,
+        size: usize,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatrixLayoutCreate(
+        layout: *mut cublasLtMatrixLayout_t,
+        dtype: c_int,
+        rows: u64,
+        cols: u64,
+        ld: i64,
+    ) -> cublasStatus_t;
+    pub fn cublasLtMatrixLayoutSetAttribute(
+        layout: cublasLtMatrixLayout_t,
+        attr: c_int,
+        buf: *const c_void,
+        size: usize,
+    ) -> cublasStatus_t;
     pub fn cublasLtMatrixLayoutDestroy(layout: cublasLtMatrixLayout_t) -> cublasStatus_t;
     pub fn cublasLtMatmulPreferenceCreate(pref: *mut cublasLtMatmulPreference_t) -> cublasStatus_t;
     pub fn cublasLtMatmulPreferenceDestroy(pref: cublasLtMatmulPreference_t) -> cublasStatus_t;
-    pub fn cublasLtMatmulPreferenceSetAttribute(pref: cublasLtMatmulPreference_t, attr: c_int, buf: *const c_void, size: usize) -> cublasStatus_t;
+    pub fn cublasLtMatmulPreferenceSetAttribute(
+        pref: cublasLtMatmulPreference_t,
+        attr: c_int,
+        buf: *const c_void,
+        size: usize,
+    ) -> cublasStatus_t;
     #[allow(clippy::too_many_arguments)]
     pub fn cublasLtMatmulAlgoGetHeuristic(
         handle: cublasLtHandle_t,
@@ -371,11 +405,15 @@ unsafe extern "C" {
         handle: cublasLtHandle_t,
         compute_desc: cublasLtMatmulDesc_t,
         alpha: *const c_void,
-        a: CUdeviceptr, a_desc: cublasLtMatrixLayout_t,
-        b: CUdeviceptr, b_desc: cublasLtMatrixLayout_t,
+        a: CUdeviceptr,
+        a_desc: cublasLtMatrixLayout_t,
+        b: CUdeviceptr,
+        b_desc: cublasLtMatrixLayout_t,
         beta: *const c_void,
-        c: CUdeviceptr, c_desc: cublasLtMatrixLayout_t,
-        d: CUdeviceptr, d_desc: cublasLtMatrixLayout_t,
+        c: CUdeviceptr,
+        c_desc: cublasLtMatrixLayout_t,
+        d: CUdeviceptr,
+        d_desc: cublasLtMatrixLayout_t,
         algo: *const u64,
         workspace: CUdeviceptr,
         workspace_size: usize,
