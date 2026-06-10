@@ -14,6 +14,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# CUDA device runtime (`CudaDevice` and friends). Forwards to
+# metaltile-runtime/cuda so downstream tile projects only name the facade.
+cuda = ["metaltile-runtime/cuda"]
+
 [dependencies]
 metaltile-core.workspace = true
 metaltile-macros.workspace = true
