@@ -160,6 +160,7 @@ pub const CUDA_R_16F: c_int = 2;
 pub const CUDA_R_32F: c_int = 0;
 pub const CUDA_R_16BF: c_int = 14;
 pub const CUDA_R_4F_E2M1: c_int = 33;
+pub const CUDA_R_8F_E4M3: c_int = 28;
 
 // cublasComputeType_t
 pub const CUBLAS_COMPUTE_32F: c_int = 68;

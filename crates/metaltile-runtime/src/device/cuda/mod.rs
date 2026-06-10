@@ -956,6 +956,132 @@ impl CudaDevice {
         Ok(())
     }
 
+    /// FP8 (e4m3) GEMM via cuBLASLt with per-tensor f32 DEVICE scale
+    /// pointers (dequant scales; D = scaleX*scaleW * X·Wᵀ). TN layout —
+    /// the FP8-required form. ~2x the f16 rate on GB10, far gentler
+    /// quantization than FP4 (the vendor recipe for this model family runs
+    /// the Mamba/shared/o-proj GEMMs at FP8).
+    #[allow(clippy::too_many_arguments)]
+    pub fn gemm_cublaslt_fp8(
+        &self,
+        x: CUdeviceptr,       // [m, k] e4m3 row-major activation
+        x_scale: CUdeviceptr, // f32 scalar (device)
+        w: CUdeviceptr,       // [n, k] e4m3 row-major weight
+        w_scale: CUdeviceptr, // f32 scalar (device)
+        out: CUdeviceptr,     // [m, n] row-major result
+        m: usize,
+        n: usize,
+        k: usize,
+        out_f32: bool,
+    ) -> Result<(), MetalTileError> {
+        self.ensure_current();
+        let (lt, workspace) = self.cublaslt_ctx()?;
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
+        unsafe {
+            let mut desc: cublasLtMatmulDesc_t = ptr::null_mut();
+            let s = cublasLtMatmulDescCreate(&mut desc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+            if s != CUBLAS_STATUS_SUCCESS {
+                return Err(MetalTileError::Dispatch(format!("cublasLtMatmulDescCreate: {s}")));
+            }
+            let opt = CUBLAS_OP_T;
+            let opn = CUBLAS_OP_N;
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSA,
+                &opt as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_TRANSB,
+                &opn as *const c_int as *const c_void,
+                std::mem::size_of::<c_int>(),
+            );
+            // Per-tensor f32 scales (default SCALAR mode — no scale-mode attr
+            // needed). With the col-major reorder A=W and B=X.
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                &w_scale as *const CUdeviceptr as *const c_void,
+                std::mem::size_of::<CUdeviceptr>(),
+            );
+            cublasLtMatmulDescSetAttribute(
+                desc,
+                CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                &x_scale as *const CUdeviceptr as *const c_void,
+                std::mem::size_of::<CUdeviceptr>(),
+            );
+            let mut a_l: cublasLtMatrixLayout_t = ptr::null_mut();
+            let mut b_l: cublasLtMatrixLayout_t = ptr::null_mut();
+            let mut d_l: cublasLtMatrixLayout_t = ptr::null_mut();
+            cublasLtMatrixLayoutCreate(&mut a_l, CUDA_R_8F_E4M3, k as u64, n as u64, k as i64);
+            cublasLtMatrixLayoutCreate(&mut b_l, CUDA_R_8F_E4M3, k as u64, m as u64, k as i64);
+            cublasLtMatrixLayoutCreate(&mut d_l, if out_f32 { CUDA_R_32F } else { CUDA_R_16F }, n as u64, m as u64, n as i64);
+
+            let mut pref: cublasLtMatmulPreference_t = ptr::null_mut();
+            cublasLtMatmulPreferenceCreate(&mut pref);
+            let ws_bytes: usize = CUBLASLT_WORKSPACE_BYTES;
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &ws_bytes as *const usize as *const c_void,
+                std::mem::size_of::<usize>(),
+            );
+            let red_mask: u32 = CUBLASLT_REDUCTION_SCHEME_NONE;
+            cublasLtMatmulPreferenceSetAttribute(
+                pref,
+                CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK,
+                &red_mask as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+            );
+            let mut result = cublasLtMatmulHeuristicResult_t::default();
+            let mut returned: c_int = 0;
+            let hs = cublasLtMatmulAlgoGetHeuristic(
+                lt, desc, a_l, b_l, d_l, d_l, pref, 1, &mut result, &mut returned,
+            );
+            if hs != CUBLAS_STATUS_SUCCESS || returned < 1 {
+                cublasLtMatmulPreferenceDestroy(pref);
+                cublasLtMatrixLayoutDestroy(a_l);
+                cublasLtMatrixLayoutDestroy(b_l);
+                cublasLtMatrixLayoutDestroy(d_l);
+                cublasLtMatmulDescDestroy(desc);
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLt-fp8: no algo (m={m} n={n} k={k} status={hs} returned={returned})"
+                )));
+            }
+            let mm = cublasLtMatmul(
+                lt,
+                desc,
+                &alpha as *const f32 as *const c_void,
+                w,
+                a_l,
+                x,
+                b_l,
+                &beta as *const f32 as *const c_void,
+                out,
+                d_l,
+                out,
+                d_l,
+                result.algo.as_ptr(),
+                workspace,
+                ws_bytes,
+                self.stream,
+            );
+            cublasLtMatmulPreferenceDestroy(pref);
+            cublasLtMatrixLayoutDestroy(a_l);
+            cublasLtMatrixLayoutDestroy(b_l);
+            cublasLtMatrixLayoutDestroy(d_l);
+            cublasLtMatmulDescDestroy(desc);
+            if mm != CUBLAS_STATUS_SUCCESS {
+                return Err(MetalTileError::Dispatch(format!(
+                    "cublasLtMatmul(fp8) failed: status {mm} (m={m} n={n} k={k})"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Strided-batched tensor-core GEMM via cuBLAS.
     /// Computes `batch_count` independent GEMMs in one call:
     ///   `C_i[m,n] = X_i[m,k] · W_i[n,k]^T`
