@@ -162,12 +162,13 @@ fn run_corpus_on_hip() {
             let label = format!("{} [{dt}]", t.name());
 
             // Debug: DUMP_HIP=<kernel name> prints the generated HIP source.
-            if let Ok(want) = std::env::var("DUMP_HIP") {
-                if t.name() == want && dt == DType::F32 {
-                    use metaltile_codegen::{CodegenBackend, HipGenerator};
-                    if let Ok(src) = HipGenerator::new().generate(kernel) {
-                        eprintln!("==== {} (HIP) ====\n{src}\n==== end ====", t.name());
-                    }
+            if let Ok(want) = std::env::var("DUMP_HIP")
+                && t.name() == want
+                && dt == DType::F32
+            {
+                use metaltile_codegen::{CodegenBackend, HipGenerator};
+                if let Ok(src) = HipGenerator::new().generate(kernel) {
+                    eprintln!("==== {} (HIP) ====\n{src}\n==== end ====", t.name());
                 }
             }
 

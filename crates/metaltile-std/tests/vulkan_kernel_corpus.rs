@@ -166,14 +166,14 @@ fn run_corpus_on_vulkan() {
             let grid = setup.grid();
             let label = format!("{} [{dt}]", t.name());
 
-            if let Ok(want) = std::env::var("DUMP_VK") {
-                if t.name() == want && dt == DType::F32 {
-                    use metaltile_codegen::{CodegenBackend, GlslGenerator};
-                    if let Ok(src) =
-                        GlslGenerator::new().with_local_size_3d(grid.tpg).generate(kernel)
-                    {
-                        eprintln!("==== {} (Vulkan/GLSL) ====\n{src}\n==== end ====", t.name());
-                    }
+            if let Ok(want) = std::env::var("DUMP_VK")
+                && t.name() == want
+                && dt == DType::F32
+            {
+                use metaltile_codegen::{CodegenBackend, GlslGenerator};
+                if let Ok(src) = GlslGenerator::new().with_local_size_3d(grid.tpg).generate(kernel)
+                {
+                    eprintln!("==== {} (Vulkan/GLSL) ====\n{src}\n==== end ====", t.name());
                 }
             }
 
