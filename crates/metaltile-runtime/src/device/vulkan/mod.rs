@@ -245,14 +245,15 @@ impl VulkanDevice {
                 &mut qcount,
                 qprops.as_mut_ptr(),
             );
-            let queue_family_index = qprops
-                .iter()
-                .position(|q| q.queueFlags & VK_QUEUE_COMPUTE_BIT != 0)
-                .ok_or_else(|| {
-                    MetalTileError::Dispatch(
-                        "vulkan: no queue family with VK_QUEUE_COMPUTE_BIT".into(),
-                    )
-                })? as u32;
+            let Some(queue_family_index) =
+                qprops.iter().position(|q| q.queueFlags & VK_QUEUE_COMPUTE_BIT != 0)
+            else {
+                vkDestroyInstance(instance, ptr::null());
+                return Err(MetalTileError::Dispatch(
+                    "vulkan: no queue family with VK_QUEUE_COMPUTE_BIT".into(),
+                ));
+            };
+            let queue_family_index = queue_family_index as u32;
 
             // Logical device + queue. Chain Vulkan 1.1 + 1.2 feature
             // structs so we can request `shaderFloat16`, `shaderInt8`,
@@ -402,10 +403,14 @@ impl VulkanDevice {
                 pPoolSizes: pool_sizes.as_ptr(),
             };
             let mut descriptor_pool: VkDescriptorPool = VK_NULL_HANDLE;
-            vk_check(
+            if let Err(e) = vk_check(
                 vkCreateDescriptorPool(device, &pool_ci, ptr::null(), &mut descriptor_pool),
                 "vkCreateDescriptorPool",
-            )?;
+            ) {
+                vkDestroyDevice(device, ptr::null());
+                vkDestroyInstance(instance, ptr::null());
+                return Err(e);
+            }
 
             // Command pool for transient compute submissions.
             let cmd_ci = VkCommandPoolCreateInfo {
@@ -415,10 +420,15 @@ impl VulkanDevice {
                 queueFamilyIndex: queue_family_index,
             };
             let mut command_pool: VkCommandPool = VK_NULL_HANDLE;
-            vk_check(
+            if let Err(e) = vk_check(
                 vkCreateCommandPool(device, &cmd_ci, ptr::null(), &mut command_pool),
                 "vkCreateCommandPool",
-            )?;
+            ) {
+                vkDestroyDescriptorPool(device, descriptor_pool, ptr::null());
+                vkDestroyDevice(device, ptr::null());
+                vkDestroyInstance(instance, ptr::null());
+                return Err(e);
+            }
 
             Ok(Some(VulkanDevice {
                 instance,
