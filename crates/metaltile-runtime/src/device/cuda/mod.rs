@@ -275,6 +275,13 @@ pub struct CudaDevice {
     /// `synchronize`/`download`). `usize` holds the host pointer.
     pinned_free: Mutex<HashMap<usize, Vec<usize>>>,
     pinned_inflight: Mutex<Vec<(usize, usize)>>,
+    /// Host allocations whose contents were baked into a captured CUDA graph
+    /// as memcpy-node SOURCES. Replay re-reads these host pointers, so they
+    /// must stay alive AND unmodified for the graph's lifetime (a transient
+    /// source Vec dangling by replay time = illegal access / garbage pointer
+    /// arrays = misaligned address inside the replayed GEMMs). Parked while
+    /// capturing, retained for the process lifetime.
+    graph_host_hold: Mutex<Vec<Box<dyn std::any::Any + Send>>>,
     /// Dedicated non-blocking stream that ALL kernel launches + async H2D ride on.
     /// Replacing the null stream is what makes a whole decode token CUDA-graph
     /// CAPTURABLE (phase-1 of the megakernel: replay ~390 launches as one graph,
@@ -394,6 +401,7 @@ impl CudaDevice {
                 pool_cap,
                 pinned_free: Mutex::new(HashMap::new()),
                 pinned_inflight: Mutex::new(Vec::new()),
+                graph_host_hold: Mutex::new(Vec::new()),
                 stream,
                 capturing: std::sync::atomic::AtomicBool::new(false),
                 cublas: Mutex::new(0),
@@ -1150,6 +1158,11 @@ impl CudaDevice {
             },
             "cuMemcpyHtoDAsync(grouped_ptrs)",
         )?;
+        // Capturing: replay re-reads `staging` from the recorded host pointer —
+        // park it (alive + frozen) for the graph's lifetime.
+        if self.is_capturing() {
+            self.graph_host_hold.lock().unwrap().push(Box::new(staging));
+        }
 
         let st = unsafe {
             cublasGemmGroupedBatchedEx(
@@ -1262,6 +1275,11 @@ impl CudaDevice {
             },
             "cuMemcpyHtoDAsync(batched_ptrs)",
         )?;
+        // Capturing: replay re-reads `staging` from the recorded host pointer —
+        // park it (alive + frozen) for the graph's lifetime.
+        if self.is_capturing() {
+            self.graph_host_hold.lock().unwrap().push(Box::new(staging));
+        }
         let st = unsafe {
             cublasGemmBatchedEx(
                 h,
@@ -1481,6 +1499,13 @@ impl CudaDevice {
         self.ensure_current();
         let buf = self.alloc(data.len())?;
         if !data.is_empty() {
+            // Capturing: cuStreamSynchronize is illegal on a capturing stream, and
+            // the recorded memcpy source must outlive the graph — route through
+            // htod's capture-held path instead.
+            if self.is_capturing() {
+                self.htod(buf.ptr, data)?;
+                return Ok(buf);
+            }
             // Enqueue on self.stream (NOT the null stream). Kernels ride self.stream
             // (CU_STREAM_NON_BLOCKING), which does NOT order against null-stream copies —
             // so a null-stream HtoD lets the driver run a dependent kernel BEFORE the copy
@@ -1637,6 +1662,21 @@ impl CudaDevice {
             return Ok(());
         }
         let len = bytes.len();
+        // Capturing: the recorded memcpy node keeps the SOURCE pointer and
+        // re-reads it on every replay. Copy into a held Vec (alive + frozen for
+        // the graph's lifetime) instead of the caller's transient slice or a
+        // recyclable pinned slot.
+        if self.is_capturing() {
+            let held: Vec<u8> = bytes.to_vec();
+            cu_check(
+                unsafe {
+                    cuMemcpyHtoDAsync_v2(ptr, held.as_ptr() as *const c_void, len, self.stream)
+                },
+                "cuMemcpyHtoDAsync(capture-held)",
+            )?;
+            self.graph_host_hold.lock().unwrap().push(Box::new(held));
+            return Ok(());
+        }
         // Large uploads skip the pinned staging path (pinning them would balloon
         // host pinned memory), but MUST still be enqueued on `self.stream` — NOT
         // the null stream. `self.stream` is CU_STREAM_NON_BLOCKING, so a null-
