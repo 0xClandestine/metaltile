@@ -1307,10 +1307,13 @@ impl CudaDevice {
             "nvrtcCreateProgram",
         )?;
 
-        // Compile to the device's virtual architecture.
-        let arch =
-            CString::new(format!("--gpu-architecture=compute_{}{}", self.cc_major, self.cc_minor))
-                .unwrap();
+        // Compile to the device's virtual architecture. METALTILE_CUDA_ARCH
+        // overrides (e.g. `compute_121a` — the accelerated-arch suffix unlocks
+        // family-specific instructions like the Blackwell block-scaled FP4 mma,
+        // which base-arch PTX rejects).
+        let arch_str = std::env::var("METALTILE_CUDA_ARCH")
+            .unwrap_or_else(|_| format!("compute_{}{}", self.cc_major, self.cc_minor));
+        let arch = CString::new(format!("--gpu-architecture={arch_str}")).unwrap();
         // NVRTC does not auto-include the toolkit headers (cuda_fp16.h,
         // cuda_bf16.h) — point it at <toolkit>/include.
         let cuda_root = std::env::var("CUDA_PATH")
