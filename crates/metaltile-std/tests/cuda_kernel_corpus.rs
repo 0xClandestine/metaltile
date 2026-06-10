@@ -14,26 +14,44 @@
 //! Runs only with `--features cuda` on a CUDA host (the GX10 / sm_121).
 #![cfg(feature = "cuda")]
 
+use std::collections::BTreeMap;
+
 use metaltile_core::dtype::DType;
 use metaltile_runtime::CudaDevice;
-use std::collections::BTreeMap;
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
-        DType::F32 => bytes.chunks_exact(4).take(n)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect(),
-        DType::F16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::f16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::BF16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::bf16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::I32 => bytes.chunks_exact(4).take(n)
-            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
-        DType::U32 => bytes.chunks_exact(4).take(n)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect(),
+        DType::F16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::f16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::BF16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::bf16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
         DType::I8 => bytes.iter().take(n).map(|&b| b as i8 as f32).collect(),
         DType::U8 => bytes.iter().take(n).map(|&b| b as f32).collect(),
         _ => vec![0.0; n],
@@ -78,31 +96,40 @@ const KNOWN_HARD: &[(&str, &str)] = &[
     ("test_mt_gated_delta_prep_chunk_no_gqa [f16]", "cancellation-amplified rounding"),
 ];
 
-fn known_hard(name: &str) -> bool {
-    KNOWN_HARD.iter().any(|(k, _)| name.contains(k))
-}
+fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
 fn is_unsupported(msg: &str) -> bool {
     let m = msg.to_lowercase();
     [
         // Codegen coverage gaps (kernel not wired yet on CUDA).
-        "phase 1", "phase 2", "not supported", "not yet implemented", "strided",
-        "kernelmode", "multi-dimensional", "transform", "secondary",
+        "phase 1",
+        "phase 2",
+        "not supported",
+        "not yet implemented",
+        "strided",
+        "kernelmode",
+        "multi-dimensional",
+        "transform",
+        "secondary",
         // Device-capability limits (mirrors the Vulkan harness's device-cap
         // bucket): a kernel the codegen *does* cover but the target arch
         // physically cannot run. These reflect bit-accuracy on what the arch
         // CAN run, so classify as UNSUPPORTED rather than a hard ERROR.
         //   - >48KB dynamic shared memory on pre-Volta (sm_5x/6x, e.g. Pascal):
         //     typed MetalTileError::DeviceCapability surfaced before launch.
-        "device capability", "unsupported on this device", ">48kb",
+        "device capability",
+        "unsupported on this device",
+        ">48kb",
         "dynamic shared memory",
         //   - raw driver rejection if it ever escapes pre-launch validation.
         "culaunchkernel: invalid argument",
         //   - tensor-core MMA / WMMA paths needing sm_70+ on older arches.
-        "requires sm_70", "tensor core", "mma is not supported",
+        "requires sm_70",
+        "tensor core",
+        "mma is not supported",
     ]
-        .iter()
-        .any(|p| m.contains(p))
+    .iter()
+    .any(|p| m.contains(p))
 }
 
 #[test]
@@ -176,9 +203,10 @@ fn run_corpus_on_cuda() {
                         known += 1;
                     } else {
                         mismatch += 1;
-                        hard_failures.push(format!("MISMATCH {label}: max|Δ|={worst:.3e} > {tol:.3e}"));
+                        hard_failures
+                            .push(format!("MISMATCH {label}: max|Δ|={worst:.3e} > {tol:.3e}"));
                     }
-                }
+                },
                 Err(e) => {
                     let msg = e.to_string();
                     if known_hard(&label) {
@@ -200,13 +228,15 @@ fn run_corpus_on_cuda() {
                         error += 1;
                         hard_failures.push(format!("ERROR {label}: {msg}"));
                     }
-                }
+                },
             }
         }
     }
 
     eprintln!("\n=== CUDA corpus result ===");
-    eprintln!("PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}");
+    eprintln!(
+        "PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}"
+    );
     eprintln!("--- unsupported reasons (top buckets) ---");
     let mut reasons: Vec<_> = unsup_reasons.iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(a.1));

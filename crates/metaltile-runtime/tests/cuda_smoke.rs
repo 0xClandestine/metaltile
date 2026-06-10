@@ -17,7 +17,15 @@ use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
     ir::{
-        BinOpKind, ConstExprDecl, IndexExpr, Kernel, Op, Param, ParamKind, ReduceKind, UnaryOpKind,
+        BinOpKind,
+        ConstExprDecl,
+        IndexExpr,
+        Kernel,
+        Op,
+        Param,
+        ParamKind,
+        ReduceKind,
+        UnaryOpKind,
         ValueId,
     },
     shape::Shape,
@@ -40,12 +48,22 @@ fn vector_add_ir() -> Kernel {
     k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
     k.body.name_value(ValueId::new(0), "idx");
     k.body.push_op(
-        Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+        Op::Load {
+            src: "a".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            mask: None,
+            other: None,
+        },
         ValueId::new(1),
     );
     k.body.name_value(ValueId::new(1), "x");
     k.body.push_op(
-        Op::Load { src: "b".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+        Op::Load {
+            src: "b".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            mask: None,
+            other: None,
+        },
         ValueId::new(2),
     );
     k.body.name_value(ValueId::new(2), "y");
@@ -133,11 +151,7 @@ fn row_reduce_sum_ir() -> Kernel {
         is_output: true,
         kind: ParamKind::Tensor,
     });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     let row = ValueId::new(0);
     let nval = ValueId::new(1);
     let rs = ValueId::new(2);
@@ -196,12 +210,37 @@ fn rms_norm_ir() -> Kernel {
         });
     }
     k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
-    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("eps"), dtype: DType::F32, value: None });
+    k.constexprs.push(ConstExprDecl {
+        name: ConstExpr::new("eps"),
+        dtype: DType::F32,
+        value: None,
+    });
 
     let v = |i| ValueId::new(i);
-    let (row, tidv, nval, rs, col, x, sq, ssq, nf, msq, epsv, t, inv, w, xn, outv) =
-        (v(0), v(1), v(2), v(3), v(4), v(5), v(6), v(7), v(8), v(9), v(10), v(11), v(12), v(13), v(14), v(15));
-    let ld = |src: &str, idx: Vec<IndexExpr>| Op::Load { src: src.into(), indices: idx, mask: None, other: None };
+    let (row, tidv, nval, rs, col, x, sq, ssq, nf, msq, epsv, t, inv, w, xn, outv) = (
+        v(0),
+        v(1),
+        v(2),
+        v(3),
+        v(4),
+        v(5),
+        v(6),
+        v(7),
+        v(8),
+        v(9),
+        v(10),
+        v(11),
+        v(12),
+        v(13),
+        v(14),
+        v(15),
+    );
+    let ld = |src: &str, idx: Vec<IndexExpr>| Op::Load {
+        src: src.into(),
+        indices: idx,
+        mask: None,
+        other: None,
+    };
 
     k.body.push_op(Op::ProgramId { axis: 0 }, row);
     k.body.name_value(row, "row");
@@ -280,9 +319,7 @@ fn scale_by_param_ir() -> Kernel {
     k
 }
 
-fn f32s_to_bytes(v: &[f32]) -> Vec<u8> {
-    v.iter().flat_map(|x| x.to_ne_bytes()).collect()
-}
+fn f32s_to_bytes(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_ne_bytes()).collect() }
 fn bytes_to_f32s(b: &[u8]) -> Vec<f32> {
     b.chunks_exact(4).map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
@@ -441,15 +478,14 @@ fn row_reduce_sum_cuda_end_to_end() {
     const ROWS: usize = 128;
     const N: usize = 256;
     let inp: Vec<f32> = (0..ROWS * N).map(|i| ((i % 17) as f32 - 8.0) * 0.01).collect();
-    let expected: Vec<f32> = (0..ROWS)
-        .map(|r| inp[r * N..(r + 1) * N].iter().sum::<f32>())
-        .collect();
+    let expected: Vec<f32> =
+        (0..ROWS).map(|r| inp[r * N..(r + 1) * N].iter().sum::<f32>()).collect();
 
     let dinp = dev.upload(&f32s_to_bytes(&inp)).expect("upload inp");
-    let dout = dev.alloc(ROWS * 4).expect("alloc out");
+    let d_out = dev.alloc(ROWS * 4).expect("alloc out");
 
     let mut pin = dinp.device_ptr();
-    let mut pout = dout.device_ptr();
+    let mut pout = d_out.device_ptr();
     let mut n: u32 = N as u32;
     // Arg order: inp, out, <constexpr n>. (Reduction mode → no _n_elems.)
     let mut args: [*mut c_void; 3] = [
@@ -461,7 +497,7 @@ fn row_reduce_sum_cuda_end_to_end() {
     dev.launch_1d(func, ROWS as u32, 256, &mut args).expect("launch");
 
     let mut out_bytes = vec![0u8; ROWS * 4];
-    dev.download(&dout, &mut out_bytes).expect("download out");
+    dev.download(&d_out, &mut out_bytes).expect("download out");
     let got = bytes_to_f32s(&out_bytes);
 
     let mut max_err = 0.0f32;
@@ -503,11 +539,11 @@ fn rms_norm_cuda_end_to_end() {
 
     let dx = dev.upload(&f32s_to_bytes(&x)).expect("upload x");
     let dw = dev.upload(&f32s_to_bytes(&w)).expect("upload w");
-    let dout = dev.alloc(ROWS * N * 4).expect("alloc out");
+    let d_out = dev.alloc(ROWS * N * 4).expect("alloc out");
 
     let mut px = dx.device_ptr();
     let mut pw = dw.device_ptr();
-    let mut pout = dout.device_ptr();
+    let mut pout = d_out.device_ptr();
     let mut n: u32 = N as u32;
     let mut ep = eps;
     // Arg order: x, w, out, <constexpr n>, <constexpr eps>.
@@ -521,7 +557,7 @@ fn rms_norm_cuda_end_to_end() {
     dev.launch_1d(func, ROWS as u32, N as u32, &mut args).expect("launch");
 
     let mut out_bytes = vec![0u8; ROWS * N * 4];
-    dev.download(&dout, &mut out_bytes).expect("download out");
+    dev.download(&d_out, &mut out_bytes).expect("download out");
     let got = bytes_to_f32s(&out_bytes);
 
     let mut max_err = 0.0f32;
