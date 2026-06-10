@@ -17,8 +17,7 @@
 mod common;
 
 use common::gpu_lock;
-use metaltile::runner::run_kernel_test;
-use metaltile_runtime::Context;
+use metaltile::{Context, runner::run_kernel_test};
 
 #[test]
 fn all_registered_kernel_tests_pass() {

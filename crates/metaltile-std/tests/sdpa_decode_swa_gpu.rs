@@ -38,8 +38,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, pack_bytes, ramp};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::{Context, DispatchSpec, ResidentBuffer};
+use metaltile::{Context, DispatchSpec, ResidentBuffer, core::ir::KernelMode};
 use metaltile_std::ffai::sdpa_decode::ffai_sdpa_decode as sdpa_decode;
 
 // (n_q_heads, n_kv_heads, n_kv, window_size, sink_tokens). Qwen3-class

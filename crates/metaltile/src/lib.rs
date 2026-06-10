@@ -95,8 +95,14 @@ pub use metaltile_codegen::error::Error as CodegenError;
 pub use metaltile_core as core;
 /// Proc macros and helper macros used by kernel definitions.
 pub use metaltile_macros::{bench, constexpr, kernel, scalar, shape, strided, test_kernel, tile};
-/// Runtime context, dispatch result, and top-level runtime error.
-pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
+/// Runtime context, dispatch types, resident buffers, and top-level runtime error.
+pub use metaltile_runtime::{
+    Context,
+    DispatchResult,
+    DispatchSpec,
+    MetalTileError,
+    ResidentBuffer,
+};
 /// CUDA device runtime entry points (feature `cuda`).
 #[cfg(feature = "cuda")]
 pub use metaltile_runtime::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};

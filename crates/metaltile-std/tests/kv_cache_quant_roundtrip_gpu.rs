@@ -42,8 +42,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes, unpack_u32_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::kv_cache::{
     bulk_dequant_kv_int4,
     bulk_dequant_kv_int8,

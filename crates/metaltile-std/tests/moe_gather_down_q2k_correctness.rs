@@ -14,8 +14,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::moe_gather_down_q2k::ffai_moe_gather_down_q2k;
 // The Q2_K output-index → (qs byte, 2-bit shift) map is the single shared
 // definition in `quant::gguf`: the kernel, the quantizer, and this oracle all

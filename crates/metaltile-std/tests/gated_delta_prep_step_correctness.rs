@@ -41,8 +41,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::gated_delta_prep::mt_gated_delta_prep_step;
 
 // ────────────────────────────────────────────────────────────────────

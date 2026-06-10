@@ -31,10 +31,10 @@ mod common;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile::{
+    Context,
     codegen::msl::{MslConfig, MslGenerator},
     core::dtype::DType,
 };
-use metaltile_runtime::Context;
 use metaltile_std::mlx::sgload_smoke::mt_sgload_smoke;
 
 /// Sanity-check that the MSL the codegen produces actually contains

@@ -9,8 +9,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::gemv_q8::{ffai_grouped_gemv_q8, ffai_grouped_gemv_q8_rows};
 
 fn xorshift(s: &mut u32) -> u32 {

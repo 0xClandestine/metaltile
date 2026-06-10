@@ -12,8 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile::core::ir::Kernel;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::Kernel};
 use metaltile_std::probe::mma_layout_probe::{
     mt_mma_probe_a_identity_b_gemm,
     mt_mma_probe_a_identity_b_identity,
