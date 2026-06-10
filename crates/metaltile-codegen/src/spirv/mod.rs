@@ -1023,7 +1023,17 @@ impl GlslGenerator {
                 let lt = types.get(lhs).copied().unwrap_or("float");
                 let rt = types.get(rhs).copied().unwrap_or("float");
                 let both_int = (lt == "uint" || lt == "int") && (rt == "uint" || rt == "int");
-                let ty = if int_op {
+                // Shifts preserve the lhs SIGNEDNESS: `int(bits << 24) >> 24`
+                // sign-extends a packed i8 only if `>>` stays an arithmetic
+                // (signed) shift. Forcing `uint` here turned it logical and
+                // broke every signed-quant decode on Vulkan (int8/fp4/fp8
+                // corpus families) — C++ backends keep the operand type, so
+                // mirror that when the lhs is `int`.
+                let signed_shift =
+                    matches!(bop, BinOpKind::Shl | BinOpKind::Shr) && lt == "int";
+                let ty = if signed_shift {
+                    "int"
+                } else if int_op {
                     "uint"
                 } else if arith_op && both_int {
                     if lt == "int" || rt == "int" { "int" } else { "uint" }
@@ -1043,6 +1053,9 @@ impl GlslGenerator {
                 // by 1 ULP on 2 elements out of 8192.
                 if matches!(bop, BinOpKind::Div) && ty == "float" {
                     writeln!(out, "{pad}{ty} {v} = mt_fdiv({l}, {r});").ok();
+                } else if signed_shift {
+                    let sym = if matches!(bop, BinOpKind::Shl) { "<<" } else { ">>" };
+                    writeln!(out, "{pad}int {v} = (int({l}) {sym} int({r}));").ok();
                 } else {
                     writeln!(out, "{pad}{ty} {v} = {};", glsl_binop(*bop, &l, &r)).ok();
                 }
