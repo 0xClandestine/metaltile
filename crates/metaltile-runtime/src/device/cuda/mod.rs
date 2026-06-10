@@ -205,9 +205,21 @@ impl Prepared<'_> {
 
 /// Soft cap on total bytes parked in the caching pool. Beyond this we stop
 /// retaining freed buffers (and evict on demand) so the pool can't hoard VRAM.
-/// 4 GiB is plenty of headroom for a forward's transients while leaving the
-/// 30B weights + KV resident on the 120 GB unified-memory GB10.
-const POOL_CAP_BYTES: usize = 4 * 1024 * 1024 * 1024;
+/// The 4 GiB default gives a forward's transients plenty of headroom while
+/// leaving model weights + KV resident on a unified-memory box (e.g. the
+/// 120 GB GB10); `METALTILE_POOL_CAP_MB=N` overrides it per host/workload.
+#[inline]
+fn pool_cap_bytes() -> usize {
+    use std::sync::OnceLock;
+    static CAP: OnceLock<usize> = OnceLock::new();
+    const DEFAULT: usize = 4 * 1024 * 1024 * 1024;
+    *CAP.get_or_init(|| {
+        std::env::var("METALTILE_POOL_CAP_MB")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map_or(DEFAULT, |mb| mb * 1024 * 1024)
+    })
+}
 
 /// Round a requested allocation length up to a pool BUCKET size. A forward's
 /// transient outputs (per-layer/per-expert GEMM/attn buffers) have ever-varying
@@ -257,7 +269,7 @@ pub struct CudaDevice {
     /// finished consuming it.
     ///
     /// Key = bucket size in bytes (NOT the requested len). `pooled_bytes`
-    /// tracks the total parked so we can cap the pool ([`POOL_CAP_BYTES`]) and
+    /// tracks the total parked so we can cap the pool ([`pool_cap_bytes`]) and
     /// evict beyond it rather than hoard VRAM. Default-on; set
     /// `METALTILE_POOL_ALLOC_OFF=1` ([`pool_enabled`]) for direct
     /// `cuMemAlloc`/`cuMemFree` (clean A/B).
@@ -370,7 +382,8 @@ impl CudaDevice {
             }
             // Caching allocator DEFAULT-ON (alloc()/Drop route through it): nsys
             // showed raw cuMemAlloc/cuMemFree at 62% of CUDA API time. METALTILE_POOL_ALLOC_OFF=1
-            // restores direct driver alloc/free (clean A/B). 4GB pool cap (POOL_CAP_BYTES).
+            // restores direct driver alloc/free (clean A/B). Pool cap defaults
+            // to 4GB; METALTILE_POOL_CAP_MB overrides (pool_cap_bytes()).
             let pool_enabled = std::env::var("METALTILE_POOL_ALLOC_OFF").is_err();
             Ok(Some(CudaDevice {
                 ctx,
@@ -1576,7 +1589,7 @@ impl CudaDevice {
             // buffer pointers, so releasing one to the driver makes replay read
             // freed memory ("unspecified launch failure"). Retain past the cap for
             // the (transient) capture; the pool drains normally afterward.
-            if *parked + bucket > POOL_CAP_BYTES && !self.is_capturing() {
+            if *parked + bucket > pool_cap_bytes() && !self.is_capturing() {
                 drop(parked);
                 unsafe { cuMemFree_v2(ptr) };
                 return;
