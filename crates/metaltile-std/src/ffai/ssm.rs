@@ -339,6 +339,97 @@ pub mod kernel_tests {
     use super::{conv1d_causal_step, mt_ssm_step, ssm_step, ssm_step_a2d};
     use crate::utils::pack_f32;
 
+    // ── SSD portable-scan kernels: cross-backend codegen smoke ────────────
+    // The Mamba2 SSD chunked-matmul prefill scan (ffai-ops
+    // `ssm_prefill_scan_ssd_portable`) is built from these `ssd_*` #[kernel]
+    // ops + `ffai_gemm_batched`. The whole point is PORTABILITY — they must
+    // codegen cleanly to MSL (Metal), CUDA (Nvidia), HIP (AMD/RDNA4) and
+    // SPIR-V/GLSL (Vulkan), NOT raw-CUDA. This asserts every backend emits a
+    // kernel definition under the declared name (catches a DSL construct that
+    // only lowers on one target).
+    #[test]
+    fn ssd_portable_kernels_codegen_all_backends() {
+        use metaltile_codegen::{
+            CudaGenerator,
+            GlslGenerator,
+            HipGenerator,
+            backend::CodegenBackend,
+            msl::{MslConfig, MslGenerator},
+        };
+        use metaltile_core::{DType, ir::KernelMode};
+
+        let kernels: Vec<(&str, metaltile_core::Kernel)> = vec![
+            ("ffai_gemm_batched", {
+                let mut k = super::super::gemm::ffai_gemm_batched::kernel_ir_for(DType::F32);
+                k.mode = KernelMode::Reduction;
+                k
+            }),
+            ("ssd_lcs", {
+                let mut k = super::ssd_lcs::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_gather_bc", {
+                let mut k = super::ssd_gather_bc::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_xt", {
+                let mut k = super::ssd_xt::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_mmask", {
+                let mut k = super::ssd_mmask::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_bdt", {
+                let mut k = super::ssd_bdt::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_recur", {
+                let mut k = super::ssd_recur::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_combine", {
+                let mut k = super::ssd_combine::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_g1_cb", {
+                let mut k = super::ssd_g1_cb::kernel_ir_for();
+                k.mode = KernelMode::Reduction;
+                k
+            }),
+            ("ssd_g4_cs", {
+                let mut k = super::ssd_g4_cs::kernel_ir_for();
+                k.mode = KernelMode::Reduction;
+                k
+            }),
+        ];
+        let msl = MslGenerator::new(MslConfig::default());
+        let cuda = CudaGenerator::new();
+        let hip = HipGenerator::new();
+        let glsl = GlslGenerator::new();
+        for (name, k) in &kernels {
+            for (backend, src) in [
+                ("MSL", msl.generate(k)),
+                ("CUDA", cuda.generate(k)),
+                ("HIP", hip.generate(k)),
+                ("SPIRV/GLSL", glsl.generate(k)),
+            ] {
+                let s = src.unwrap_or_else(|e| panic!("{name}: {backend} codegen failed: {e:?}"));
+                assert!(!s.is_empty(), "{name}: {backend} emitted empty source");
+            }
+        }
+        eprintln!(
+            "✅ all SSD portable-scan kernels codegen on MSL/CUDA/HIP/SPIRV (portable to Apple/Nvidia/AMD/Vulkan)"
+        );
+    }
+
     // ── conv1d_causal_step ──────────────────────────────────────────────
 
     /// CPU oracle: `y[d] = b[d] + w[K-1][d]·x[d] + Σ_{k<K-1} w[k][d]·state[k][d]`,

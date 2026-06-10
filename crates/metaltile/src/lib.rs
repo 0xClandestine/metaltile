@@ -95,7 +95,20 @@ pub use metaltile_codegen::error::Error as CodegenError;
 pub use metaltile_core as core;
 /// Proc macros and helper macros used by kernel definitions.
 pub use metaltile_macros::{bench, constexpr, kernel, scalar, shape, strided, test_kernel, tile};
+/// Vulkan device runtime entry points (feature `vulkan`).
+#[cfg(feature = "vulkan")]
+pub use metaltile_runtime::{
+    BatchDispatch,
+    VulkanBuffer,
+    VulkanDevice,
+    VulkanPipeline,
+    VulkanRawBuffer,
+    compile_glsl_to_spv,
+};
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
+/// HIP / ROCm device runtime entry points (feature `hip`).
+#[cfg(feature = "hip")]
+pub use metaltile_runtime::{HipBuffer, HipDevice, HipKernel, HipModuleHandle};
 /// Placeholder tensor marker used in `#[kernel]` signatures.
 pub use prelude::Tensor;
