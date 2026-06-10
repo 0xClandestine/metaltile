@@ -15,9 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_codegen::error::Error as CodegenError;
-use metaltile_core::dtype::DType;
-use metaltile_runtime::{MetalTileError, VulkanDevice};
+use metaltile::{CodegenError, MetalTileError, VulkanDevice, core::dtype::DType};
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
@@ -151,7 +149,7 @@ fn run_corpus_on_vulkan() {
                 && t.name() == want
                 && dt == DType::F32
             {
-                use metaltile_codegen::{CodegenBackend, GlslGenerator};
+                use metaltile::codegen::{CodegenBackend, GlslGenerator};
                 if let Ok(src) = GlslGenerator::new().with_local_size_3d(grid.tpg).generate(kernel)
                 {
                     eprintln!("==== {} (Vulkan/GLSL) ====\n{src}\n==== end ====", t.name());

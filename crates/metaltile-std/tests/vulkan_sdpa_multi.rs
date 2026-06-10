@@ -24,8 +24,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::dtype::DType;
-use metaltile_runtime::VulkanDevice;
+use metaltile::{VulkanDevice, core::dtype::DType};
 use metaltile_std::ffai::sdpa_multi::ffai_sdpa_multi;
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -127,7 +126,7 @@ fn run_case(
 
     let dt = DType::F32;
     let mut kernel = ffai_sdpa_multi::kernel_ir_for(dt);
-    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    kernel.mode = metaltile::core::ir::KernelMode::Reduction;
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("q".into(), f32_bytes(&q));

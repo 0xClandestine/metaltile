@@ -14,6 +14,14 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# HIP / ROCm device runtime (`HipDevice` and friends). Forwards to
+# metaltile-runtime/hip so downstream tile projects only name the facade.
+hip = ["metaltile-runtime/hip"]
+# Vulkan device runtime (`VulkanDevice` and friends). Forwards to
+# metaltile-runtime/vulkan so downstream tile projects only name the facade.
+vulkan = ["metaltile-runtime/vulkan"]
+
 [dependencies]
 metaltile-core.workspace = true
 metaltile-macros.workspace = true

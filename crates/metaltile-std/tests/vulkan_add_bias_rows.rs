@@ -20,12 +20,14 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::{
-    dtype::DType,
-    ir::{BinOpKind, IndexExpr, Kernel, Op, Param, ParamKind, ValueId},
-    shape::Shape,
+use metaltile::{
+    VulkanDevice,
+    core::{
+        dtype::DType,
+        ir::{BinOpKind, IndexExpr, Kernel, Op, Param, ParamKind, ValueId},
+        shape::Shape,
+    },
 };
-use metaltile_runtime::VulkanDevice;
 
 fn p(name: &str, is_output: bool) -> Param {
     Param {

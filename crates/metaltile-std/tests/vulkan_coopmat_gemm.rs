@@ -19,8 +19,7 @@
 
 use std::{collections::BTreeMap, time::Instant};
 
-use metaltile_core::dtype::DType;
-use metaltile_runtime::VulkanDevice;
+use metaltile::{VulkanDevice, core::dtype::DType};
 use metaltile_std::ffai::gemm_q8_mpp::ffai_gemm_q8_mpp;
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -83,7 +82,7 @@ fn coopmat_gemm_q8_mpp_correct_and_fast() {
     // The kernel reads tgid_x/tgid_y + simd_group/simd_lane → Reduction
     // mode (matches the bench's `.mode(KernelMode::Reduction)`).
     let mut kernel = ffai_gemm_q8_mpp::kernel_ir_for(DType::F16);
-    kernel.mode = metaltile_core::ir::KernelMode::Reduction;
+    kernel.mode = metaltile::core::ir::KernelMode::Reduction;
 
     // Pack buffers. x as f16, qs/d as-is, out zeroed f16.
     let pack_f16 = |v: &[f32]| -> Vec<u8> {

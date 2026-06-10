@@ -16,9 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_codegen::error::Error as CodegenError;
-use metaltile_core::dtype::DType;
-use metaltile_runtime::{HipDevice, MetalTileError};
+use metaltile::{CodegenError, HipDevice, MetalTileError, core::dtype::DType};
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
@@ -155,7 +153,7 @@ fn run_corpus_on_hip() {
                 && t.name() == want
                 && dt == DType::F32
             {
-                use metaltile_codegen::{CodegenBackend, HipGenerator};
+                use metaltile::codegen::{CodegenBackend, HipGenerator};
                 if let Ok(src) = HipGenerator::new().generate(kernel) {
                     eprintln!("==== {} (HIP) ====\n{src}\n==== end ====", t.name());
                 }

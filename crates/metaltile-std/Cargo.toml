@@ -16,11 +16,11 @@ workspace = true
 # (tests/cuda_kernel_corpus.rs). Forwards to metaltile-runtime/cuda.
 cuda = ["metaltile-runtime/cuda"]
 # Run the registered #[test_kernel] corpus on the HIP / ROCm backend
-# (tests/hip_kernel_corpus.rs). Forwards to metaltile-runtime/hip.
-hip = ["metaltile-runtime/hip"]
+# (tests/hip_kernel_corpus.rs). Forwards to the facade's hip feature.
+hip = ["metaltile/hip"]
 # Run the registered #[test_kernel] corpus on the Vulkan / SPIR-V backend
-# (tests/vulkan_kernel_corpus.rs). Forwards to metaltile-runtime/vulkan.
-vulkan = ["metaltile-runtime/vulkan"]
+# (tests/vulkan_kernel_corpus.rs). Forwards to the facade's vulkan feature.
+vulkan = ["metaltile/vulkan"]
 
 [[bin]]
 name = "__tile_runner"
