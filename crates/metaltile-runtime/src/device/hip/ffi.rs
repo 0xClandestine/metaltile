@@ -57,11 +57,7 @@ pub const HIP_EVENT_DEFAULT: c_uint = 0;
 unsafe extern "C" {
     pub fn hipInit(flags: c_uint) -> hipError_t;
     pub fn hipDeviceGet(device: *mut hipDevice_t, ordinal: c_int) -> hipError_t;
-    pub fn hipDeviceGetAttribute(
-        pi: *mut c_int,
-        attrib: c_int,
-        dev: hipDevice_t,
-    ) -> hipError_t;
+    pub fn hipDeviceGetAttribute(pi: *mut c_int, attrib: c_int, dev: hipDevice_t) -> hipError_t;
     pub fn hipCtxCreate(pctx: *mut hipCtx_t, flags: c_uint, dev: hipDevice_t) -> hipError_t;
     pub fn hipCtxDestroy(ctx: hipCtx_t) -> hipError_t;
     pub fn hipCtxSynchronize() -> hipError_t;
@@ -73,23 +69,11 @@ unsafe extern "C" {
         module: hipModule_t,
         name: *const c_char,
     ) -> hipError_t;
-    pub fn hipFuncSetAttribute(
-        func: hipFunction_t,
-        attrib: c_int,
-        value: c_int,
-    ) -> hipError_t;
+    pub fn hipFuncSetAttribute(func: hipFunction_t, attrib: c_int, value: c_int) -> hipError_t;
     pub fn hipMalloc(dptr: *mut hipDeviceptr_t, bytesize: usize) -> hipError_t;
     pub fn hipFree(dptr: hipDeviceptr_t) -> hipError_t;
-    pub fn hipMemcpyHtoD(
-        dst: hipDeviceptr_t,
-        src: *const c_void,
-        byte_count: usize,
-    ) -> hipError_t;
-    pub fn hipMemcpyDtoH(
-        dst: *mut c_void,
-        src: hipDeviceptr_t,
-        byte_count: usize,
-    ) -> hipError_t;
+    pub fn hipMemcpyHtoD(dst: hipDeviceptr_t, src: *const c_void, byte_count: usize) -> hipError_t;
+    pub fn hipMemcpyDtoH(dst: *mut c_void, src: hipDeviceptr_t, byte_count: usize) -> hipError_t;
     #[allow(clippy::too_many_arguments)]
     pub fn hipModuleLaunchKernel(
         f: hipFunction_t,

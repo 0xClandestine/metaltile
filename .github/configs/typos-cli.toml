@@ -56,6 +56,10 @@ Nd = "Nd"
 # froms = "froms"
 thr = "thr"
 THR = "THR"
+# HIP shared-memory opt-in attribute (hipDeviceAttributeSharedMemPerBlockOptin)
+optin = "optin"
+Optin = "Optin"
+OPTIN = "OPTIN"
 
 [type.go]
 extend-glob = []

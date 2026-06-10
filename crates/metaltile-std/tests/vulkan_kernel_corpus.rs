@@ -15,26 +15,44 @@
 //! Runs only with `--features vulkan`.
 #![cfg(feature = "vulkan")]
 
+use std::collections::BTreeMap;
+
 use metaltile_core::dtype::DType;
 use metaltile_runtime::VulkanDevice;
-use std::collections::BTreeMap;
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
-        DType::F32 => bytes.chunks_exact(4).take(n)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect(),
-        DType::F16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::f16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::BF16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::bf16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::I32 => bytes.chunks_exact(4).take(n)
-            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
-        DType::U32 => bytes.chunks_exact(4).take(n)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect(),
+        DType::F16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::f16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::BF16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::bf16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
         DType::I8 => bytes.iter().take(n).map(|&b| b as i8 as f32).collect(),
         DType::U8 => bytes.iter().take(n).map(|&b| b as f32).collect(),
         _ => vec![0.0; n],
@@ -67,28 +85,42 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 // 4164/4164 = 100% bit-accurate.
 const KNOWN_HARD: &[(&str, &str)] = &[];
 
-fn known_hard(name: &str) -> bool {
-    KNOWN_HARD.iter().any(|(k, _)| name.contains(k))
-}
+fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
 fn is_unsupported(msg: &str) -> bool {
     let m = msg.to_lowercase();
     [
-        "phase 1", "phase 2", "phase 3", "phase 4",
-        "not supported", "not yet implemented", "not yet supported",
-        "strided", "kernelmode", "multi-dimensional", "transform", "secondary",
-        "dtype", "f16", "bf16", "i8",
+        "phase 1",
+        "phase 2",
+        "phase 3",
+        "phase 4",
+        "not supported",
+        "not yet implemented",
+        "not yet supported",
+        "strided",
+        "kernelmode",
+        "multi-dimensional",
+        "transform",
+        "secondary",
+        "dtype",
+        "f16",
+        "bf16",
+        "i8",
         // Shaderc compile failures we treat as UNSUPPORTED so the corpus
         // result reflects bit-accuracy on what's actually wired, not
         // shader-language gaps.
-        "shaderc_compile", "spirv:", "spirv ", "decode-",
+        "shaderc_compile",
+        "spirv:",
+        "spirv ",
+        "decode-",
         // Vulkan device limits — workgroup size cap, descriptor count,
         // push-constant size — these are dtype-orthogonal device caps
         // rather than codegen bugs.
-        "vkresult=", "no memory type",
+        "vkresult=",
+        "no memory type",
     ]
-        .iter()
-        .any(|p| m.contains(p))
+    .iter()
+    .any(|p| m.contains(p))
 }
 
 #[test]
@@ -163,7 +195,7 @@ fn run_corpus_on_vulkan() {
                         hard_failures
                             .push(format!("MISMATCH {label}: max|Δ|={worst:.3e} > {tol:.3e}"));
                     }
-                }
+                },
                 Err(e) => {
                     let msg = e.to_string();
                     if known_hard(t.name()) {
@@ -184,13 +216,15 @@ fn run_corpus_on_vulkan() {
                         error += 1;
                         hard_failures.push(format!("ERROR {label}: {msg}"));
                     }
-                }
+                },
             }
         }
     }
 
     eprintln!("\n=== Vulkan corpus result ===");
-    eprintln!("PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}");
+    eprintln!(
+        "PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}"
+    );
     eprintln!("--- unsupported reasons (top buckets) ---");
     let mut reasons: Vec<_> = unsup_reasons.iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(a.1));
@@ -221,10 +255,7 @@ fn run_corpus_on_vulkan() {
             s.split(" [").next().unwrap_or("").to_string()
         })
         .collect();
-    eprintln!(
-        "--- unique MISMATCH kernel-base count: {} ---",
-        unique_mm_kernels.len()
-    );
+    eprintln!("--- unique MISMATCH kernel-base count: {} ---", unique_mm_kernels.len());
     for k in &unique_mm_kernels {
         eprintln!("  · {k}");
     }
@@ -246,6 +277,6 @@ fn run_corpus_on_vulkan() {
     let error_budget: u32 = 64;
     assert!(
         error <= error_budget,
-        "Vulkan corpus produced {error} hard ERRORs (budget={error_budget}) — codegen regression"
+        "Vulkan corpus produced {error} hard errors (budget={error_budget}) — codegen regression"
     );
 }

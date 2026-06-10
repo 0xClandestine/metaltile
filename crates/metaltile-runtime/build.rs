@@ -29,9 +29,8 @@ fn main() {
 /// `/opt/rocm/lib`. `HIP_PATH` is the canonical env var; `ROCM_PATH`
 /// covers Linux installs that prefer that name.
 fn hip() {
-    let hip_root = std::env::var("HIP_PATH")
-        .or_else(|_| std::env::var("ROCM_PATH"))
-        .unwrap_or_else(|_| {
+    let hip_root =
+        std::env::var("HIP_PATH").or_else(|_| std::env::var("ROCM_PATH")).unwrap_or_else(|_| {
             if cfg!(windows) {
                 r"C:\Program Files\AMD\ROCm\7.1".to_string()
             } else {
@@ -53,11 +52,7 @@ fn hip() {
 /// under `<VULKAN_SDK>/Lib` on Windows, `<sdk>/lib` on Linux.
 fn vulkan() {
     let vk_sdk = std::env::var("VULKAN_SDK").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            r"C:\VulkanSDK\1.4.350.0".to_string()
-        } else {
-            "/usr".to_string()
-        }
+        if cfg!(windows) { r"C:\VulkanSDK\1.4.350.0".to_string() } else { "/usr".to_string() }
     });
 
     for sub in ["Lib", "lib", "lib64"] {

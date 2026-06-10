@@ -13,18 +13,18 @@
 
 pub mod backend;
 pub mod cuda;
-pub mod hip;
-pub mod spirv;
 pub mod emit;
 pub mod error;
+pub mod hip;
 pub mod kernel_registry;
 pub mod msl;
 pub mod passes;
+pub mod spirv;
 
 pub use backend::{CodegenBackend, MmaStrategy, Target, TargetProfile};
 pub use cuda::CudaGenerator;
-pub use hip::HipGenerator;
-pub use spirv::GlslGenerator;
 pub use error::{Error, Result};
+pub use hip::HipGenerator;
 pub use kernel_registry::{KernelEntry, all_kernels};
 pub use msl::{MslGenerator, config::TileSchedule, generator_for_mode, kernel_uses_n_simd};
+pub use spirv::GlslGenerator;

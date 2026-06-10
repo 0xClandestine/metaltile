@@ -17,8 +17,7 @@
 //!   # coopmat:  MT_VK_COOPMAT=1 (same line)
 #![cfg(feature = "vulkan")]
 
-use std::collections::BTreeMap;
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 
 use metaltile_core::dtype::DType;
 use metaltile_runtime::VulkanDevice;
@@ -33,9 +32,7 @@ fn xorshift(s: &mut u32) -> u32 {
     x
 }
 
-fn f16_round(v: f32) -> f32 {
-    half::f16::from_f32(v).to_f32()
-}
+fn f16_round(v: f32) -> f32 { half::f16::from_f32(v).to_f32() }
 
 #[test]
 fn coopmat_gemm_q8_mpp_correct_and_fast() {
@@ -92,12 +89,8 @@ fn coopmat_gemm_q8_mpp_correct_and_fast() {
     let pack_f16 = |v: &[f32]| -> Vec<u8> {
         v.iter().flat_map(|&f| half::f16::from_f32(f).to_bits().to_le_bytes()).collect()
     };
-    let pack_u32 = |v: &[u32]| -> Vec<u8> {
-        v.iter().flat_map(|&u| u.to_le_bytes()).collect()
-    };
-    let pack_f32 = |v: &[f32]| -> Vec<u8> {
-        v.iter().flat_map(|&f| f.to_le_bytes()).collect()
-    };
+    let pack_u32 = |v: &[u32]| -> Vec<u8> { v.iter().flat_map(|&u| u.to_le_bytes()).collect() };
+    let pack_f32 = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|&f| f.to_le_bytes()).collect() };
 
     let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     buffers.insert("x".into(), pack_f16(&x));
@@ -112,9 +105,7 @@ fn coopmat_gemm_q8_mpp_correct_and_fast() {
     let tpg = [128u32, 1, 1];
 
     // Correctness.
-    let outputs = dev
-        .run_kernel(&kernel, &buffers, grid, tpg)
-        .expect("run_kernel");
+    let outputs = dev.run_kernel(&kernel, &buffers, grid, tpg).expect("run_kernel");
     let got_bytes = outputs.get("out").expect("out buffer");
     let got: Vec<f32> = got_bytes
         .chunks_exact(2)
@@ -163,7 +154,9 @@ fn coopmat_gemm_q8_mpp_correct_and_fast() {
             maxd_ab = maxd_ab.max(d);
             max_rel_ab = max_rel_ab.max(d / refv[i].abs().max(8.0));
         }
-        eprintln!("  coopmat vs scalar (informational): maxAbsDiff={maxd_ab:.4}  maxRelDiff={max_rel_ab:.4}");
+        eprintln!(
+            "  coopmat vs scalar (informational): maxAbsDiff={maxd_ab:.4}  maxRelDiff={max_rel_ab:.4}"
+        );
         // The two GPU paths differ in staging precision (coopmat: f16
         // shared tiles + f32 fragment accumulate; scalar: f32 shared
         // tiles). Both round to f16 output. The gap is bounded by the
@@ -187,6 +180,10 @@ fn coopmat_gemm_q8_mpp_correct_and_fast() {
     let tflops = flops / per / 1e12;
     eprintln!(
         "  shape {}x{}x{}  {:.3} ms/dispatch  {:.2} TFLOP/s (incl. run_kernel overhead)",
-        n_rows, out_dim, k_in, per * 1e3, tflops
+        n_rows,
+        out_dim,
+        k_in,
+        per * 1e3,
+        tflops
     );
 }

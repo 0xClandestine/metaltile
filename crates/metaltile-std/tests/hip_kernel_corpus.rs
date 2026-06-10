@@ -17,26 +17,44 @@
 //! Runs only with `--features hip`.
 #![cfg(feature = "hip")]
 
+use std::collections::BTreeMap;
+
 use metaltile_core::dtype::DType;
 use metaltile_runtime::HipDevice;
-use std::collections::BTreeMap;
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
-        DType::F32 => bytes.chunks_exact(4).take(n)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect(),
-        DType::F16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::f16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::BF16 => bytes.chunks_exact(2).take(n).map(|b| {
-            let bits = u16::from_le_bytes(b.try_into().unwrap());
-            half::bf16::from_bits(bits).to_f32()
-        }).collect(),
-        DType::I32 => bytes.chunks_exact(4).take(n)
-            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
-        DType::U32 => bytes.chunks_exact(4).take(n)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32).collect(),
+        DType::F32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect(),
+        DType::F16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::f16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::BF16 => bytes
+            .chunks_exact(2)
+            .take(n)
+            .map(|b| {
+                let bits = u16::from_le_bytes(b.try_into().unwrap());
+                half::bf16::from_bits(bits).to_f32()
+            })
+            .collect(),
+        DType::I32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
+        DType::U32 => bytes
+            .chunks_exact(4)
+            .take(n)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as f32)
+            .collect(),
         DType::I8 => bytes.iter().take(n).map(|&b| b as i8 as f32).collect(),
         DType::U8 => bytes.iter().take(n).map(|&b| b as f32).collect(),
         _ => vec![0.0; n],
@@ -76,23 +94,28 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 // bit-accurate to the per-kernel band.
 const KNOWN_HARD: &[(&str, &str)] = &[];
 
-fn known_hard(name: &str) -> bool {
-    KNOWN_HARD.iter().any(|(k, _)| name.contains(k))
-}
+fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
 fn is_unsupported(msg: &str) -> bool {
     let m = msg.to_lowercase();
     [
-        "phase 1", "phase 2", "not supported", "not yet implemented", "strided",
-        "kernelmode", "multi-dimensional", "transform", "secondary",
+        "phase 1",
+        "phase 2",
+        "not supported",
+        "not yet implemented",
+        "strided",
+        "kernelmode",
+        "multi-dimensional",
+        "transform",
+        "secondary",
         // HIP-specific compile failures we treat as "kernel uses a CUDA
         // construct HIP doesn't accept" — counted as UNSUPPORTED so the
         // corpus result tracks what's bit-accurate, not what'd hit a
         // future textual-transform extension.
         "hiprtc",
     ]
-        .iter()
-        .any(|p| m.contains(p))
+    .iter()
+    .any(|p| m.contains(p))
 }
 
 #[test]
@@ -171,7 +194,7 @@ fn run_corpus_on_hip() {
                         hard_failures
                             .push(format!("MISMATCH {label}: max|Δ|={worst:.3e} > {tol:.3e}"));
                     }
-                }
+                },
                 Err(e) => {
                     let msg = e.to_string();
                     if known_hard(t.name()) {
@@ -192,13 +215,15 @@ fn run_corpus_on_hip() {
                         error += 1;
                         hard_failures.push(format!("ERROR {label}: {msg}"));
                     }
-                }
+                },
             }
         }
     }
 
     eprintln!("\n=== HIP corpus result ===");
-    eprintln!("PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}");
+    eprintln!(
+        "PASS={pass}  KNOWN_HARD={known}  MISMATCH={mismatch}  UNSUPPORTED={unsupported}  ERROR={error}"
+    );
     eprintln!("--- unsupported reasons (top buckets) ---");
     let mut reasons: Vec<_> = unsup_reasons.iter().collect();
     reasons.sort_by(|a, b| b.1.cmp(a.1));
@@ -250,6 +275,6 @@ fn run_corpus_on_hip() {
     let error_budget: u32 = 128;
     assert!(
         error <= error_budget,
-        "HIP corpus produced {error} hard ERRORs (budget={error_budget}) — codegen regression"
+        "HIP corpus produced {error} hard errors (budget={error_budget}) — codegen regression"
     );
 }

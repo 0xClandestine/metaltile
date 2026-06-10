@@ -27,17 +27,18 @@
 
 mod ffi;
 
-use std::collections::BTreeMap;
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_void};
-use std::ptr;
+use std::{
+    collections::BTreeMap,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_void},
+    ptr,
+};
 
+use ffi::*;
 use metaltile_codegen::{CodegenBackend, GlslGenerator, spirv::GlslBindingPlan};
 use metaltile_core::{dtype::DType, ir::Kernel};
 
 use crate::error::MetalTileError;
-
-use ffi::*;
 
 const ENTRY_POINT: &[u8] = b"main\0";
 
@@ -230,11 +231,7 @@ impl VulkanDevice {
 
             // Pick a queue family supporting compute.
             let mut qcount: u32 = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(
-                physical_device,
-                &mut qcount,
-                ptr::null_mut(),
-            );
+            vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &mut qcount, ptr::null_mut());
             let mut qprops: Vec<VkQueueFamilyProperties> = (0..qcount as usize)
                 .map(|_| VkQueueFamilyProperties {
                     queueFlags: 0,
@@ -317,13 +314,10 @@ impl VulkanDevice {
             // feature + the device extension. The subgroup size stays
             // pinned at 32 (the kernels' staging math assumes 32-lane
             // subgroups; on wave32 the 16x16 fragment spans 32 lanes).
-            let mut coop_feat: VkPhysicalDeviceCooperativeMatrixFeaturesKHR =
-                std::mem::zeroed();
-            let coop_ext_ptr =
-                VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME.as_ptr() as *const c_char;
+            let mut coop_feat: VkPhysicalDeviceCooperativeMatrixFeaturesKHR = std::mem::zeroed();
+            let coop_ext_ptr = VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME.as_ptr() as *const c_char;
             if coopmat {
-                coop_feat.sType =
-                    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+                coop_feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
                 coop_feat.cooperativeMatrix = VK_TRUE;
                 coop_feat.pNext = feat11.pNext;
                 feat11.pNext = &mut coop_feat as *mut _ as *mut c_void;
@@ -337,11 +331,7 @@ impl VulkanDevice {
                 enabledLayerCount: 0,
                 ppEnabledLayerNames: ptr::null(),
                 enabledExtensionCount: if coopmat { 1 } else { 0 },
-                ppEnabledExtensionNames: if coopmat {
-                    &coop_ext_ptr
-                } else {
-                    ptr::null()
-                },
+                ppEnabledExtensionNames: if coopmat { &coop_ext_ptr } else { ptr::null() },
                 pEnabledFeatures: ptr::null(),
             };
             let mut device: VkDevice = ptr::null_mut();
@@ -365,8 +355,7 @@ impl VulkanDevice {
                     ppEnabledExtensionNames: ptr::null(),
                     ..dev_ci
                 };
-                if vkCreateDevice(physical_device, &sgc_ci, ptr::null(), &mut device)
-                    == VK_SUCCESS
+                if vkCreateDevice(physical_device, &sgc_ci, ptr::null(), &mut device) == VK_SUCCESS
                 {
                     subgroup_size_control = true;
                 } else {
@@ -448,15 +437,10 @@ impl VulkanDevice {
 
     /// Find a memory type matching `mem_type_bits` (from
     /// `vkGetBufferMemoryRequirements`) with all the requested property flags.
-    fn find_memory_type(
-        &self,
-        mem_type_bits: u32,
-        flags: u32,
-    ) -> Result<u32, MetalTileError> {
+    fn find_memory_type(&self, mem_type_bits: u32, flags: u32) -> Result<u32, MetalTileError> {
         for i in 0..self.memory_properties.memoryTypeCount {
             if (mem_type_bits & (1u32 << i)) != 0
-                && (self.memory_properties.memoryTypes[i as usize].propertyFlags & flags)
-                    == flags
+                && (self.memory_properties.memoryTypes[i as usize].propertyFlags & flags) == flags
             {
                 return Ok(i);
             }
@@ -487,11 +471,7 @@ impl VulkanDevice {
                 vkCreateBuffer(self.device, &bci, ptr::null(), &mut buffer),
                 "vkCreateBuffer",
             )?;
-            let mut req = VkMemoryRequirements {
-                size: 0,
-                alignment: 0,
-                memoryTypeBits: 0,
-            };
+            let mut req = VkMemoryRequirements { size: 0, alignment: 0, memoryTypeBits: 0 };
             vkGetBufferMemoryRequirements(self.device, buffer, &mut req);
             let mem_type_index = self.find_memory_type(
                 req.memoryTypeBits,
@@ -508,10 +488,7 @@ impl VulkanDevice {
                 vkAllocateMemory(self.device, &ai, ptr::null(), &mut memory),
                 "vkAllocateMemory",
             )?;
-            vk_check(
-                vkBindBufferMemory(self.device, buffer, memory, 0),
-                "vkBindBufferMemory",
-            )?;
+            vk_check(vkBindBufferMemory(self.device, buffer, memory, 0), "vkBindBufferMemory")?;
             Ok(VulkanBuffer { buffer, memory, size, dev: self })
         }
     }
@@ -608,12 +585,7 @@ impl VulkanDevice {
             };
             let mut set_layout: VkDescriptorSetLayout = VK_NULL_HANDLE;
             if let Err(e) = vk_check(
-                vkCreateDescriptorSetLayout(
-                    self.device,
-                    &dsl_ci,
-                    ptr::null(),
-                    &mut set_layout,
-                ),
+                vkCreateDescriptorSetLayout(self.device, &dsl_ci, ptr::null(), &mut set_layout),
                 "vkCreateDescriptorSetLayout",
             ) {
                 vkDestroyShaderModule(self.device, shader_module, ptr::null());
@@ -670,8 +642,7 @@ impl VulkanDevice {
             } else {
                 ptr::null()
             };
-            let entry =
-                CStr::from_bytes_with_nul(ENTRY_POINT).unwrap().as_ptr();
+            let entry = CStr::from_bytes_with_nul(ENTRY_POINT).unwrap().as_ptr();
             let stage = VkPipelineShaderStageCreateInfo {
                 sType: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                 pNext: stage_pnext,
@@ -780,9 +751,9 @@ impl VulkanDevice {
         let mut push: Vec<u8> = Vec::with_capacity(plan.push_constant_bytes as usize);
         for ce in &kernel.constexprs {
             let name = ce.name.name();
-            let bytes = buffers.get(name).ok_or_else(|| {
-                MetalTileError::Dispatch(format!("missing constexpr '{name}'"))
-            })?;
+            let bytes = buffers
+                .get(name)
+                .ok_or_else(|| MetalTileError::Dispatch(format!("missing constexpr '{name}'")))?;
             let align = bytes.len().max(1);
             while push.len() % align != 0 {
                 push.push(0);
@@ -829,11 +800,7 @@ impl VulkanDevice {
         // references our slice). Hold it for the whole unsafe block.
         let buf_infos: Vec<VkDescriptorBufferInfo> = dev_bufs
             .iter()
-            .map(|b| VkDescriptorBufferInfo {
-                buffer: b.buffer,
-                offset: 0,
-                range: b.size,
-            })
+            .map(|b| VkDescriptorBufferInfo { buffer: b.buffer, offset: 0, range: b.size })
             .collect();
         let writes: Vec<VkWriteDescriptorSet> = plan
             .bindings
@@ -947,10 +914,7 @@ impl VulkanDevice {
                 signalSemaphoreCount: 0,
                 pSignalSemaphores: ptr::null(),
             };
-            vk_check(
-                vkQueueSubmit(self.queue, 1, &submit, VK_NULL_HANDLE),
-                "vkQueueSubmit",
-            )?;
+            vk_check(vkQueueSubmit(self.queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit")?;
             vk_check(vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")?;
             // One-time-submit CB: free it now, or a corpus run accumulates
             // thousands in the pool until device drop.
@@ -1115,50 +1079,48 @@ impl VulkanDevice {
     /// a resident weight read in a decode GEMV runs at device bandwidth instead
     /// of host bandwidth. Upload is one-time (staged); reads are device-local.
     /// The returned handle is freed with [`free_raw`] exactly like `alloc_raw`.
-    pub fn alloc_raw_device_local(
-        &self,
-        data: &[u8],
-    ) -> Result<VulkanRawBuffer, MetalTileError> {
+    pub fn alloc_raw_device_local(&self, data: &[u8]) -> Result<VulkanRawBuffer, MetalTileError> {
         let _exec = self.exec_lock.lock();
         let size = (data.len().max(4)) as u64;
-        let make_buffer = |usage: u32, props: u32| -> Result<(VkBuffer_, VkDeviceMemory), MetalTileError> {
-            let bci = VkBufferCreateInfo {
-                sType: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                pNext: ptr::null(),
-                flags: 0,
-                size,
-                usage,
-                sharingMode: VK_SHARING_MODE_EXCLUSIVE,
-                queueFamilyIndexCount: 0,
-                pQueueFamilyIndices: ptr::null(),
-            };
-            unsafe {
-                let mut buffer: VkBuffer_ = VK_NULL_HANDLE;
-                vk_check(
-                    vkCreateBuffer(self.device, &bci, ptr::null(), &mut buffer),
-                    "vkCreateBuffer(devlocal)",
-                )?;
-                let mut req = VkMemoryRequirements { size: 0, alignment: 0, memoryTypeBits: 0 };
-                vkGetBufferMemoryRequirements(self.device, buffer, &mut req);
-                let mti = self.find_memory_type(req.memoryTypeBits, props)?;
-                let ai = VkMemoryAllocateInfo {
-                    sType: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        let make_buffer =
+            |usage: u32, props: u32| -> Result<(VkBuffer_, VkDeviceMemory), MetalTileError> {
+                let bci = VkBufferCreateInfo {
+                    sType: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                     pNext: ptr::null(),
-                    allocationSize: req.size,
-                    memoryTypeIndex: mti,
+                    flags: 0,
+                    size,
+                    usage,
+                    sharingMode: VK_SHARING_MODE_EXCLUSIVE,
+                    queueFamilyIndexCount: 0,
+                    pQueueFamilyIndices: ptr::null(),
                 };
-                let mut memory: VkDeviceMemory = VK_NULL_HANDLE;
-                vk_check(
-                    vkAllocateMemory(self.device, &ai, ptr::null(), &mut memory),
-                    "vkAllocateMemory(devlocal)",
-                )?;
-                vk_check(
-                    vkBindBufferMemory(self.device, buffer, memory, 0),
-                    "vkBindBufferMemory(devlocal)",
-                )?;
-                Ok((buffer, memory))
-            }
-        };
+                unsafe {
+                    let mut buffer: VkBuffer_ = VK_NULL_HANDLE;
+                    vk_check(
+                        vkCreateBuffer(self.device, &bci, ptr::null(), &mut buffer),
+                        "vkCreateBuffer(devlocal)",
+                    )?;
+                    let mut req = VkMemoryRequirements { size: 0, alignment: 0, memoryTypeBits: 0 };
+                    vkGetBufferMemoryRequirements(self.device, buffer, &mut req);
+                    let mti = self.find_memory_type(req.memoryTypeBits, props)?;
+                    let ai = VkMemoryAllocateInfo {
+                        sType: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                        pNext: ptr::null(),
+                        allocationSize: req.size,
+                        memoryTypeIndex: mti,
+                    };
+                    let mut memory: VkDeviceMemory = VK_NULL_HANDLE;
+                    vk_check(
+                        vkAllocateMemory(self.device, &ai, ptr::null(), &mut memory),
+                        "vkAllocateMemory(devlocal)",
+                    )?;
+                    vk_check(
+                        vkBindBufferMemory(self.device, buffer, memory, 0),
+                        "vkBindBufferMemory(devlocal)",
+                    )?;
+                    Ok((buffer, memory))
+                }
+            };
 
         // Device-local destination (shader reads it fast).
         let (dst_buf, dst_mem) = make_buffer(
@@ -1317,7 +1279,13 @@ impl VulkanDevice {
             })
             .collect();
         unsafe {
-            vkUpdateDescriptorSets(self.device, writes.len() as u32, writes.as_ptr(), 0, ptr::null());
+            vkUpdateDescriptorSets(
+                self.device,
+                writes.len() as u32,
+                writes.as_ptr(),
+                0,
+                ptr::null(),
+            );
         }
 
         // Record + submit the command buffer.
@@ -1611,9 +1579,7 @@ impl VulkanDevice {
     pub fn name(&self) -> &str { "vulkan-device" }
 
     /// Physical handle (for future direct queries via `vkGetPhysicalDeviceProperties`).
-    pub fn physical_device_handle(&self) -> VkPhysicalDevice {
-        self.physical_device
-    }
+    pub fn physical_device_handle(&self) -> VkPhysicalDevice { self.physical_device }
 
     /// Queue family index in use.
     pub fn queue_family(&self) -> u32 { self.queue_family_index }
@@ -1641,21 +1607,14 @@ impl Drop for VulkanDevice {
 
 /// GLSL → SPIR-V via shaderc. The result is a byte-vector whose length is
 /// a multiple of 4 (SPIR-V is a stream of u32 words).
-pub fn compile_glsl_to_spv(
-    glsl_src: &str,
-    file_name: &str,
-) -> Result<Vec<u8>, MetalTileError> {
-    let csrc =
-        CString::new(glsl_src).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
-    let cfile =
-        CString::new(file_name).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
+pub fn compile_glsl_to_spv(glsl_src: &str, file_name: &str) -> Result<Vec<u8>, MetalTileError> {
+    let csrc = CString::new(glsl_src).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
+    let cfile = CString::new(file_name).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
     let centry = CString::new("main").unwrap();
     unsafe {
         let compiler = shaderc_compiler_initialize();
         if compiler.is_null() {
-            return Err(MetalTileError::Compilation(
-                "shaderc_compiler_initialize failed".into(),
-            ));
+            return Err(MetalTileError::Compilation("shaderc_compiler_initialize failed".into()));
         }
         let opts = shaderc_compile_options_initialize();
         shaderc_compile_options_set_target_env(

@@ -16,8 +16,17 @@ use metaltile_core::{
     constexpr::ConstExpr,
     dtype::DType,
     ir::{
-        BinOpKind, ConstExprDecl, IndexExpr, Kernel, KernelMode, Op, Param, ParamKind,
-        ReduceKind, UnaryOpKind, ValueId,
+        BinOpKind,
+        ConstExprDecl,
+        IndexExpr,
+        Kernel,
+        KernelMode,
+        Op,
+        Param,
+        ParamKind,
+        ReduceKind,
+        UnaryOpKind,
+        ValueId,
     },
     shape::Shape,
 };
@@ -37,12 +46,22 @@ fn vector_add_ir() -> Kernel {
     k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
     k.body.name_value(ValueId::new(0), "idx");
     k.body.push_op(
-        Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+        Op::Load {
+            src: "a".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            mask: None,
+            other: None,
+        },
         ValueId::new(1),
     );
     k.body.name_value(ValueId::new(1), "x");
     k.body.push_op(
-        Op::Load { src: "b".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+        Op::Load {
+            src: "b".into(),
+            indices: vec![IndexExpr::Value(ValueId::new(0))],
+            mask: None,
+            other: None,
+        },
         ValueId::new(2),
     );
     k.body.name_value(ValueId::new(2), "y");
@@ -74,8 +93,8 @@ fn shaderc_glsl_to_spv_for_vector_add() {
     // a Vulkan device — it exercises the GLSL→SPIR-V path in isolation.
     let g = GlslGenerator::new();
     let glsl = g.generate(&vector_add_ir()).unwrap();
-    let spv = metaltile_runtime::compile_glsl_to_spv(&glsl, "vector_add.comp")
-        .expect("shaderc compile");
+    let spv =
+        metaltile_runtime::compile_glsl_to_spv(&glsl, "vector_add.comp").expect("shaderc compile");
     // SPIR-V magic number `0x07230203` (little-endian).
     assert!(spv.len() >= 4);
     assert_eq!(&spv[..4], &[0x03, 0x02, 0x23, 0x07]);
@@ -90,17 +109,13 @@ fn vulkan_vector_add_f32_bit_exact() {
         Ok(None) => {
             eprintln!("vulkan_smoke: no Vulkan device — skipping");
             return;
-        }
+        },
         Err(e) => {
             eprintln!("vulkan_smoke: Vulkan init failed ({e:?}) — skipping");
             return;
-        }
+        },
     };
-    eprintln!(
-        "vulkan_smoke: device='{}' qfam={}",
-        dev.name(),
-        dev.queue_family()
-    );
+    eprintln!("vulkan_smoke: device='{}' qfam={}", dev.name(), dev.queue_family());
 
     const N: usize = 16 * 1024;
     let a: Vec<f32> = (0..N).map(|i| (i as f32) * 0.5).collect();
@@ -108,9 +123,7 @@ fn vulkan_vector_add_f32_bit_exact() {
     let oracle: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
 
     let mut bufs = BTreeMap::new();
-    let to_bytes = |v: &[f32]| -> Vec<u8> {
-        v.iter().flat_map(|x| x.to_le_bytes()).collect()
-    };
+    let to_bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     bufs.insert("a".to_string(), to_bytes(&a));
     bufs.insert("b".to_string(), to_bytes(&b));
     bufs.insert("c".to_string(), vec![0u8; N * 4]);
@@ -118,9 +131,7 @@ fn vulkan_vector_add_f32_bit_exact() {
     let block = 256u32;
     let grid = (N as u32).div_ceil(block);
     let k = vector_add_ir();
-    let out = dev
-        .run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1])
-        .expect("vulkan run_kernel");
+    let out = dev.run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1]).expect("vulkan run_kernel");
 
     let c_bytes = out.get("c").expect("output `c` present");
     let c: Vec<f32> = c_bytes
@@ -157,8 +168,13 @@ fn scale_add_exp_ir() -> Kernel {
         value: None,
     });
     let (idx, x, sc, mul, y, sum, e) = (
-        ValueId::new(0), ValueId::new(1), ValueId::new(2),
-        ValueId::new(3), ValueId::new(4), ValueId::new(5), ValueId::new(6),
+        ValueId::new(0),
+        ValueId::new(1),
+        ValueId::new(2),
+        ValueId::new(3),
+        ValueId::new(4),
+        ValueId::new(5),
+        ValueId::new(6),
     );
     k.body.push_op(Op::ProgramId { axis: 0 }, idx);
     k.body.name_value(idx, "idx");
@@ -196,7 +212,7 @@ fn vulkan_scale_add_exp_f32_tight_tol() {
         _ => {
             eprintln!("vulkan_smoke: no Vulkan device — skipping");
             return;
-        }
+        },
     };
 
     const N: usize = 4096;
@@ -206,9 +222,7 @@ fn vulkan_scale_add_exp_f32_tight_tol() {
     let oracle: Vec<f32> = a.iter().zip(&b).map(|(x, y)| (x * scale + y).exp()).collect();
 
     let mut bufs = BTreeMap::new();
-    let to_bytes = |v: &[f32]| -> Vec<u8> {
-        v.iter().flat_map(|x| x.to_le_bytes()).collect()
-    };
+    let to_bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     bufs.insert("a".into(), to_bytes(&a));
     bufs.insert("b".into(), to_bytes(&b));
     bufs.insert("c".into(), vec![0u8; N * 4]);
@@ -217,9 +231,7 @@ fn vulkan_scale_add_exp_f32_tight_tol() {
     let block = 256u32;
     let grid = (N as u32).div_ceil(block);
     let k = scale_add_exp_ir();
-    let out = dev
-        .run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1])
-        .expect("vulkan run_kernel");
+    let out = dev.run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1]).expect("vulkan run_kernel");
 
     let c: Vec<f32> = out["c"]
         .chunks_exact(4)
@@ -245,21 +257,27 @@ fn row_reduce_sum_ir() -> Kernel {
     let mut k = Kernel::new("row_reduce_sum");
     k.mode = KernelMode::Reduction;
     k.params.push(Param {
-        name: "inp".into(), dtype: DType::F32, shape: Shape::scalar(),
-        is_output: false, kind: ParamKind::Tensor,
+        name: "inp".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: false,
+        kind: ParamKind::Tensor,
     });
     k.params.push(Param {
-        name: "out".into(), dtype: DType::F32, shape: Shape::scalar(),
-        is_output: true, kind: ParamKind::Tensor,
+        name: "out".into(),
+        dtype: DType::F32,
+        shape: Shape::scalar(),
+        is_output: true,
+        kind: ParamKind::Tensor,
     });
-    k.constexprs.push(ConstExprDecl {
-        name: ConstExpr::new("n"),
-        dtype: DType::U32,
-        value: None,
-    });
+    k.constexprs.push(ConstExprDecl { name: ConstExpr::new("n"), dtype: DType::U32, value: None });
     let (row, nv, rs, re, acc, res) = (
-        ValueId::new(0), ValueId::new(1), ValueId::new(2),
-        ValueId::new(3), ValueId::new(4), ValueId::new(5),
+        ValueId::new(0),
+        ValueId::new(1),
+        ValueId::new(2),
+        ValueId::new(3),
+        ValueId::new(4),
+        ValueId::new(5),
     );
     k.body.push_op(Op::ProgramId { axis: 0 }, row);
     k.body.name_value(row, "row");
@@ -270,9 +288,15 @@ fn row_reduce_sum_ir() -> Kernel {
     k.body.name_value(re, "re");
     k.body.push_op(
         Op::StrideReduce {
-            src: "inp".into(), offset: rs, stride: nv, end: re,
-            op: ReduceKind::Sum, dtype: DType::F32,
-            transform: None, secondary_src: None, secondary_base: None,
+            src: "inp".into(),
+            offset: rs,
+            stride: nv,
+            end: re,
+            op: ReduceKind::Sum,
+            dtype: DType::F32,
+            transform: None,
+            secondary_src: None,
+            secondary_base: None,
         },
         acc,
     );
@@ -280,7 +304,10 @@ fn row_reduce_sum_ir() -> Kernel {
     k.body.push_op(Op::Reduce { value: acc, axis: 0, op: ReduceKind::Sum }, res);
     k.body.name_value(res, "result");
     k.body.push_op_no_result(Op::Store {
-        dst: "out".into(), indices: vec![IndexExpr::Value(row)], value: res, mask: None,
+        dst: "out".into(),
+        indices: vec![IndexExpr::Value(row)],
+        value: res,
+        mask: None,
     });
     k
 }
@@ -292,22 +319,17 @@ fn vulkan_row_reduce_sum_f32() {
         _ => {
             eprintln!("vulkan_smoke: no Vulkan device — skipping");
             return;
-        }
+        },
     };
 
     const ROWS: usize = 32;
     const COLS: usize = 4096;
-    let inp: Vec<f32> = (0..ROWS * COLS)
-        .map(|i| ((i as i32 % 257) as f32) * 0.001 - 0.1)
-        .collect();
-    let oracle: Vec<f32> = (0..ROWS)
-        .map(|r| inp[r * COLS..(r + 1) * COLS].iter().sum::<f32>())
-        .collect();
+    let inp: Vec<f32> = (0..ROWS * COLS).map(|i| ((i as i32 % 257) as f32) * 0.001 - 0.1).collect();
+    let oracle: Vec<f32> =
+        (0..ROWS).map(|r| inp[r * COLS..(r + 1) * COLS].iter().sum::<f32>()).collect();
 
     let mut bufs = BTreeMap::new();
-    let to_bytes = |v: &[f32]| -> Vec<u8> {
-        v.iter().flat_map(|x| x.to_le_bytes()).collect()
-    };
+    let to_bytes = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     bufs.insert("inp".into(), to_bytes(&inp));
     bufs.insert("out".into(), vec![0u8; ROWS * 4]);
     bufs.insert("n".into(), (COLS as u32).to_le_bytes().to_vec());
@@ -315,9 +337,7 @@ fn vulkan_row_reduce_sum_f32() {
     let block = 256u32;
     let grid = ROWS as u32;
     let k = row_reduce_sum_ir();
-    let out = dev
-        .run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1])
-        .expect("vulkan run_kernel");
+    let out = dev.run_kernel(&k, &bufs, [grid, 1, 1], [block, 1, 1]).expect("vulkan run_kernel");
 
     let got: Vec<f32> = out["out"]
         .chunks_exact(4)

@@ -51,9 +51,7 @@ impl Default for HipGenerator {
 }
 
 impl HipGenerator {
-    pub fn new() -> Self {
-        Self::with_profile(TargetProfile::hip())
-    }
+    pub fn new() -> Self { Self::with_profile(TargetProfile::hip()) }
 
     /// Pin to a specific HIP profile. For [`TargetProfile::hip_wave64`]
     /// (CDNA — MI200/MI300/MI350), we *also* swap the inner CUDA
@@ -197,12 +195,22 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.name_value(ValueId::new(0), "idx");
         k.body.push_op(
-            Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "a".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(1),
         );
         k.body.name_value(ValueId::new(1), "x");
         k.body.push_op(
-            Op::Load { src: "b".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "b".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(2),
         );
         k.body.name_value(ValueId::new(2), "y");
@@ -266,17 +274,25 @@ mod tests {
     /// textually. We don't run it (no CDNA hardware available); we just
     /// inspect the source.
     fn row_reduce_sum_ir() -> Kernel {
-        use metaltile_core::constexpr::ConstExpr;
-        use metaltile_core::ir::{ConstExprDecl, KernelMode, ReduceKind};
+        use metaltile_core::{
+            constexpr::ConstExpr,
+            ir::{ConstExprDecl, KernelMode, ReduceKind},
+        };
         let mut k = Kernel::new("row_reduce_sum");
         k.mode = KernelMode::Reduction;
         k.params.push(Param {
-            name: "inp".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: false, kind: ParamKind::Tensor,
+            name: "inp".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor,
         });
         k.params.push(Param {
-            name: "out".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: true, kind: ParamKind::Tensor,
+            name: "out".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: ParamKind::Tensor,
         });
         k.constexprs.push(ConstExprDecl {
             name: ConstExpr::new("n"),
@@ -284,8 +300,12 @@ mod tests {
             value: None,
         });
         let (row, nv, rs, re, acc, res) = (
-            ValueId::new(0), ValueId::new(1), ValueId::new(2),
-            ValueId::new(3), ValueId::new(4), ValueId::new(5),
+            ValueId::new(0),
+            ValueId::new(1),
+            ValueId::new(2),
+            ValueId::new(3),
+            ValueId::new(4),
+            ValueId::new(5),
         );
         k.body.push_op(Op::ProgramId { axis: 0 }, row);
         k.body.name_value(row, "row");
@@ -296,9 +316,15 @@ mod tests {
         k.body.name_value(re, "re");
         k.body.push_op(
             Op::StrideReduce {
-                src: "inp".into(), offset: rs, stride: nv, end: re,
-                op: ReduceKind::Sum, dtype: DType::F32,
-                transform: None, secondary_src: None, secondary_base: None,
+                src: "inp".into(),
+                offset: rs,
+                stride: nv,
+                end: re,
+                op: ReduceKind::Sum,
+                dtype: DType::F32,
+                transform: None,
+                secondary_src: None,
+                secondary_base: None,
             },
             acc,
         );
@@ -306,7 +332,10 @@ mod tests {
         k.body.push_op(Op::Reduce { value: acc, axis: 0, op: ReduceKind::Sum }, res);
         k.body.name_value(res, "result");
         k.body.push_op_no_result(Op::Store {
-            dst: "out".into(), indices: vec![IndexExpr::Value(row)], value: res, mask: None,
+            dst: "out".into(),
+            indices: vec![IndexExpr::Value(row)],
+            value: res,
+            mask: None,
         });
         k
     }
