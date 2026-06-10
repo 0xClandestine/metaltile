@@ -19,17 +19,18 @@
 
 mod ffi;
 
-use std::collections::BTreeMap;
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr;
+use std::{
+    collections::BTreeMap,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_void},
+    ptr,
+};
 
+use ffi::*;
 use metaltile_codegen::{CodegenBackend, HipGenerator};
 use metaltile_core::ir::Kernel;
 
 use crate::error::MetalTileError;
-
-use ffi::*;
 
 fn synth_strided_meta(shape: &metaltile_core::shape::Shape, strides: bool) -> Vec<u8> {
     use metaltile_core::shape::Dim;
@@ -204,8 +205,7 @@ impl HipDevice {
             // `METALTILE_HIP_GFX` if set, else default to gfx1201 (RDNA 4 /
             // RX 9070 XT — the user's primary target). Override for anything
             // else: gfx1100 RDNA 3, gfx942 MI300, gfx950 MI350.
-            let gfx = std::env::var("METALTILE_HIP_GFX")
-                .unwrap_or_else(|_| "gfx1201".to_string());
+            let gfx = std::env::var("METALTILE_HIP_GFX").unwrap_or_else(|_| "gfx1201".to_string());
             // Derive wave size from gfx family rather than querying the
             // warp-size attribute — one less FFI round trip and the gfx
             // string is already authoritative here. gfx9xx (CDNA) is
@@ -247,15 +247,10 @@ impl HipDevice {
 
     /// Compile HIP C++ source → AMDGPU code-object → loaded module via
     /// hipRTC + `hipModuleLoadData`.
-    pub fn compile(
-        &self,
-        src: &str,
-        prog_name: &str,
-    ) -> Result<HipModuleHandle, MetalTileError> {
-        let csrc =
-            CString::new(src).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
-        let cname = CString::new(prog_name)
-            .map_err(|e| MetalTileError::Compilation(e.to_string()))?;
+    pub fn compile(&self, src: &str, prog_name: &str) -> Result<HipModuleHandle, MetalTileError> {
+        let csrc = CString::new(src).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
+        let cname =
+            CString::new(prog_name).map_err(|e| MetalTileError::Compilation(e.to_string()))?;
 
         let mut prog: hiprtcProgram = ptr::null_mut();
         hiprtc_check(
@@ -298,10 +293,9 @@ impl HipDevice {
                 }
             });
         let inc = CString::new(format!("-I{hip_root}/include")).unwrap();
-        let opts: [*const c_char; 4] = [arch.as_ptr(), no_fma.as_ptr(), prec_div.as_ptr(), inc.as_ptr()];
-        let compile_res = unsafe {
-            hiprtcCompileProgram(prog, opts.len() as _, opts.as_ptr())
-        };
+        let opts: [*const c_char; 4] =
+            [arch.as_ptr(), no_fma.as_ptr(), prec_div.as_ptr(), inc.as_ptr()];
+        let compile_res = unsafe { hiprtcCompileProgram(prog, opts.len() as _, opts.as_ptr()) };
 
         let log = unsafe {
             let mut log_size: usize = 0;
@@ -309,8 +303,7 @@ impl HipDevice {
             if log_size > 1 {
                 let mut buf = vec![0u8; log_size];
                 hiprtcGetProgramLog(prog, buf.as_mut_ptr() as *mut c_char);
-                String::from_utf8_lossy(&buf[..log_size.saturating_sub(1)])
-                    .into_owned()
+                String::from_utf8_lossy(&buf[..log_size.saturating_sub(1)]).into_owned()
             } else {
                 String::new()
             }
@@ -319,9 +312,7 @@ impl HipDevice {
         if compile_res != HIPRTC_SUCCESS {
             unsafe { hiprtcDestroyProgram(&mut prog) };
             let msg = unsafe {
-                CStr::from_ptr(hiprtcGetErrorString(compile_res))
-                    .to_string_lossy()
-                    .into_owned()
+                CStr::from_ptr(hiprtcGetErrorString(compile_res)).to_string_lossy().into_owned()
             };
             return Err(MetalTileError::Compilation(format!(
                 "hiprtcCompileProgram failed: {msg}\n--- log ---\n{log}"
@@ -374,20 +365,14 @@ impl HipDevice {
         let buf = self.alloc(data.len())?;
         if !data.is_empty() {
             hip_check(
-                unsafe {
-                    hipMemcpyHtoD(buf.ptr, data.as_ptr() as *const c_void, data.len())
-                },
+                unsafe { hipMemcpyHtoD(buf.ptr, data.as_ptr() as *const c_void, data.len()) },
                 "hipMemcpyHtoD",
             )?;
         }
         Ok(buf)
     }
 
-    pub fn download(
-        &self,
-        buf: &HipBuffer,
-        out: &mut [u8],
-    ) -> Result<(), MetalTileError> {
+    pub fn download(&self, buf: &HipBuffer, out: &mut [u8]) -> Result<(), MetalTileError> {
         let n = out.len().min(buf.len);
         if n == 0 {
             return Ok(());
@@ -442,9 +427,7 @@ impl HipDevice {
                 // still over an implementation-specific cap. Report it
                 // explicitly so the harness can bucket it.
                 let msg = unsafe {
-                    CStr::from_ptr(hipGetErrorString(attr_res))
-                        .to_string_lossy()
-                        .into_owned()
+                    CStr::from_ptr(hipGetErrorString(attr_res)).to_string_lossy().into_owned()
                 };
                 return Err(MetalTileError::Dispatch(format!(
                     "hipFuncSetAttribute(MaxDynamicSharedMemorySize={shared_bytes}): {msg}"
@@ -455,8 +438,12 @@ impl HipDevice {
             unsafe {
                 hipModuleLaunchKernel(
                     func.func,
-                    grid[0], grid[1], grid[2],
-                    block[0], block[1], block[2],
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    block[0],
+                    block[1],
+                    block[2],
                     shared_bytes,
                     ptr::null_mut(),
                     args.as_mut_ptr(),
@@ -485,10 +472,7 @@ impl HipDevice {
         let mut out_meta: Vec<Option<(String, usize)>> = Vec::new();
         for p in &kernel.params {
             let bytes = buffers.get(&p.name).ok_or_else(|| {
-                MetalTileError::Dispatch(format!(
-                    "missing buffer for param '{}'",
-                    p.name
-                ))
+                MetalTileError::Dispatch(format!("missing buffer for param '{}'", p.name))
             })?;
             let buf = self.upload(bytes)?;
             dev_ptrs.push(buf.device_ptr());
@@ -513,9 +497,9 @@ impl HipDevice {
         let mut scalars: Vec<Vec<u8>> = Vec::new();
         for ce in &kernel.constexprs {
             let name = ce.name.name();
-            let bytes = buffers.get(name).ok_or_else(|| {
-                MetalTileError::Dispatch(format!("missing constexpr '{name}'"))
-            })?;
+            let bytes = buffers
+                .get(name)
+                .ok_or_else(|| MetalTileError::Dispatch(format!("missing constexpr '{name}'")))?;
             scalars.push(bytes.clone());
         }
         if kernel.mode == metaltile_core::ir::KernelMode::Elementwise {
@@ -525,23 +509,13 @@ impl HipDevice {
                 .position(|p| p.is_output)
                 .and_then(|i| {
                     let p = &kernel.params[i];
-                    buffers
-                        .get(&p.name)
-                        .map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
+                    buffers.get(&p.name).map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
                 })
                 .unwrap_or(0);
             scalars.push(n_elems.to_le_bytes().to_vec());
         }
 
-        Ok(Prepared {
-            _module: module,
-            func,
-            dev_bufs,
-            dev_ptrs,
-            scalars,
-            out_meta,
-            shared_bytes,
-        })
+        Ok(Prepared { _module: module, func, dev_bufs, dev_ptrs, scalars, out_meta, shared_bytes })
     }
 
     /// End-to-end generic dispatch (CUDA `run_kernel` analog).

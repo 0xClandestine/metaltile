@@ -349,11 +349,14 @@ pub mod kernel_tests {
     // only lowers on one target).
     #[test]
     fn ssd_portable_kernels_codegen_all_backends() {
-        use metaltile_codegen::backend::CodegenBackend;
-        use metaltile_codegen::msl::{MslConfig, MslGenerator};
-        use metaltile_codegen::{CudaGenerator, GlslGenerator, HipGenerator};
-        use metaltile_core::DType;
-        use metaltile_core::ir::KernelMode;
+        use metaltile_codegen::{
+            CudaGenerator,
+            GlslGenerator,
+            HipGenerator,
+            backend::CodegenBackend,
+            msl::{MslConfig, MslGenerator},
+        };
+        use metaltile_core::{DType, ir::KernelMode};
 
         let kernels: Vec<(&str, metaltile_core::Kernel)> = vec![
             ("ffai_gemm_batched", {
@@ -361,15 +364,51 @@ pub mod kernel_tests {
                 k.mode = KernelMode::Reduction;
                 k
             }),
-            ("ssd_lcs", { let mut k = super::ssd_lcs::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_gather_bc", { let mut k = super::ssd_gather_bc::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_xt", { let mut k = super::ssd_xt::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_mmask", { let mut k = super::ssd_mmask::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_bdt", { let mut k = super::ssd_bdt::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_recur", { let mut k = super::ssd_recur::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_combine", { let mut k = super::ssd_combine::kernel_ir_for(); k.mode = KernelMode::Grid3D; k }),
-            ("ssd_g1_cb", { let mut k = super::ssd_g1_cb::kernel_ir_for(); k.mode = KernelMode::Reduction; k }),
-            ("ssd_g4_cs", { let mut k = super::ssd_g4_cs::kernel_ir_for(); k.mode = KernelMode::Reduction; k }),
+            ("ssd_lcs", {
+                let mut k = super::ssd_lcs::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_gather_bc", {
+                let mut k = super::ssd_gather_bc::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_xt", {
+                let mut k = super::ssd_xt::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_mmask", {
+                let mut k = super::ssd_mmask::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_bdt", {
+                let mut k = super::ssd_bdt::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_recur", {
+                let mut k = super::ssd_recur::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_combine", {
+                let mut k = super::ssd_combine::kernel_ir_for();
+                k.mode = KernelMode::Grid3D;
+                k
+            }),
+            ("ssd_g1_cb", {
+                let mut k = super::ssd_g1_cb::kernel_ir_for();
+                k.mode = KernelMode::Reduction;
+                k
+            }),
+            ("ssd_g4_cs", {
+                let mut k = super::ssd_g4_cs::kernel_ir_for();
+                k.mode = KernelMode::Reduction;
+                k
+            }),
         ];
         let msl = MslGenerator::new(MslConfig::default());
         let cuda = CudaGenerator::new();
@@ -386,7 +425,9 @@ pub mod kernel_tests {
                 assert!(!s.is_empty(), "{name}: {backend} emitted empty source");
             }
         }
-        eprintln!("✅ all SSD portable-scan kernels codegen on MSL/CUDA/HIP/SPIRV (portable to Apple/Nvidia/AMD/Vulkan)");
+        eprintln!(
+            "✅ all SSD portable-scan kernels codegen on MSL/CUDA/HIP/SPIRV (portable to Apple/Nvidia/AMD/Vulkan)"
+        );
     }
 
     // ── conv1d_causal_step ──────────────────────────────────────────────

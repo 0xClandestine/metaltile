@@ -37,9 +37,7 @@ fn xorshift(s: &mut u32) -> u32 {
     x
 }
 
-fn rnd(s: &mut u32) -> f32 {
-    ((xorshift(s) % 2000) as f32 / 1000.0) - 1.0
-}
+fn rnd(s: &mut u32) -> f32 { ((xorshift(s) % 2000) as f32 / 1000.0) - 1.0 }
 
 #[allow(clippy::too_many_arguments)]
 fn naive_sdpa_multi(
@@ -100,11 +98,7 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn read_f32(bytes: &[u8], n: usize) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .take(n)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect()
+    bytes.chunks_exact(4).take(n).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,8 +139,7 @@ fn run_case(
     buffers.insert("base_kv".into(), (base_kv as u32).to_le_bytes().to_vec());
     buffers.insert("n_query".into(), (n_query as u32).to_le_bytes().to_vec());
     buffers.insert("kv_stride".into(), (kv_stride as u32).to_le_bytes().to_vec());
-    buffers
-        .insert("heads_per_group".into(), (heads_per_group as u32).to_le_bytes().to_vec());
+    buffers.insert("heads_per_group".into(), (heads_per_group as u32).to_le_bytes().to_vec());
     buffers.insert("causal".into(), (causal as u32).to_le_bytes().to_vec());
     buffers.insert("scale".into(), scale.to_le_bytes().to_vec());
 

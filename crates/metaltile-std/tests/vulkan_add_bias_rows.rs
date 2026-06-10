@@ -20,9 +20,11 @@
 
 use std::collections::BTreeMap;
 
-use metaltile_core::dtype::DType;
-use metaltile_core::ir::{BinOpKind, IndexExpr, Kernel, Op, Param, ParamKind, ValueId};
-use metaltile_core::shape::Shape;
+use metaltile_core::{
+    dtype::DType,
+    ir::{BinOpKind, IndexExpr, Kernel, Op, Param, ParamKind, ValueId},
+    shape::Shape,
+};
 use metaltile_runtime::VulkanDevice;
 
 fn p(name: &str, is_output: bool) -> Param {
@@ -61,14 +63,14 @@ fn bias_rows_kernel(n: u32, index_mode: &str) -> Kernel {
     match index_mode {
         "mod" => {
             k.body.push_op(Op::BinOp { op: BinOpKind::Mod, lhs: i, rhs: n_const }, col);
-        }
+        },
         "divmul" => {
             let q = nid();
             k.body.push_op(Op::BinOp { op: BinOpKind::Div, lhs: i, rhs: n_const }, q);
             let qn = nid();
             k.body.push_op(Op::BinOp { op: BinOpKind::Mul, lhs: q, rhs: n_const }, qn);
             k.body.push_op(Op::BinOp { op: BinOpKind::Sub, lhs: i, rhs: qn }, col);
-        }
+        },
         _ => unreachable!(),
     }
 
@@ -107,11 +109,7 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn read_f32(bytes: &[u8], n: usize) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .take(n)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect()
+    bytes.chunks_exact(4).take(n).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect()
 }
 
 fn run_case(dev: &VulkanDevice, n_rows: usize, n: usize, index_mode: &str) {

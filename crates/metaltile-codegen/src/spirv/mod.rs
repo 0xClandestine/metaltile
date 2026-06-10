@@ -47,14 +47,23 @@
 //!   a small Phase-3 chore.
 //! - `Strided` params still unsupported.
 
-use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use metaltile_core::{
     dtype::DType,
     ir::{
-        ActKind, BinOpKind, Block, IndexExpr, Kernel, KernelMode, Op, Param, ParamKind,
-        ReduceKind, UnaryOpKind, ValueId,
+        ActKind,
+        BinOpKind,
+        Block,
+        IndexExpr,
+        Kernel,
+        KernelMode,
+        Op,
+        Param,
+        ParamKind,
+        ReduceKind,
+        UnaryOpKind,
+        ValueId,
     },
 };
 
@@ -147,7 +156,7 @@ impl GlslGenerator {
                     Some(hint) => format!("v_{hint}_{}", v.as_u32()),
                     None => format!("v{}", v.as_u32()),
                 }
-            }
+            },
             None => "/*<no-value>*/".to_string(),
         }
     }
@@ -158,7 +167,7 @@ impl GlslGenerator {
             IndexExpr::Const(c) => format!("uint({c})"),
             IndexExpr::Range(v, off) => {
                 format!("({} + uint({off}))", self.vname(Some(*v), block, ov))
-            }
+            },
         }
     }
 
@@ -207,16 +216,13 @@ impl GlslGenerator {
                                 return Err(Error::UnsupportedOp(format!(
                                     "spirv: multi-dim index needs static dims on `{src}`"
                                 )));
-                            }
+                            },
                         }
                     }
-                    terms.push(format!(
-                        "({}) * uint({stride})",
-                        self.idx_term(ix, block, ov)
-                    ));
+                    terms.push(format!("({}) * uint({stride})", self.idx_term(ix, block, ov)));
                 }
                 Ok(terms.join(" + "))
-            }
+            },
         }
     }
 
@@ -291,22 +297,29 @@ impl GlslGenerator {
         // Phase 2.1; landing the real decode unlocks all of them.
         writeln!(out, "float mt_decode_e2m1(uint code) {{").ok();
         writeln!(out, "    uint m = code & 7u;").ok();
-        writeln!(out, "    float mag = (m < 1u) ? 0.0 : (m < 2u) ? 0.5 : (m < 3u) ? 1.0 : (m < 4u) ? 1.5").ok();
-        writeln!(out, "              : (m < 5u) ? 2.0 : (m < 6u) ? 3.0 : (m < 7u) ? 4.0 : 6.0;").ok();
+        writeln!(
+            out,
+            "    float mag = (m < 1u) ? 0.0 : (m < 2u) ? 0.5 : (m < 3u) ? 1.0 : (m < 4u) ? 1.5"
+        )
+        .ok();
+        writeln!(out, "              : (m < 5u) ? 2.0 : (m < 6u) ? 3.0 : (m < 7u) ? 4.0 : 6.0;")
+            .ok();
         writeln!(out, "    return ((code & 8u) != 0u) ? -mag : mag;").ok();
         writeln!(out, "}}").ok();
         writeln!(out, "float mt_decode_e4m3(uint bits) {{").ok();
         writeln!(out, "    uint e = (bits >> 3u) & 15u;").ok();
         writeln!(out, "    uint m = bits & 7u;").ok();
         writeln!(out, "    float mag = (e < 1u) ? (float(m) * 0.001953125)").ok();
-        writeln!(out, "              : ((1.0 + float(m) * 0.125) * exp2(float(int(e)) - 7.0));").ok();
+        writeln!(out, "              : ((1.0 + float(m) * 0.125) * exp2(float(int(e)) - 7.0));")
+            .ok();
         writeln!(out, "    return (((bits >> 7u) & 1u) != 0u) ? -mag : mag;").ok();
         writeln!(out, "}}").ok();
         writeln!(out, "float mt_decode_e5m2(uint bits) {{").ok();
         writeln!(out, "    uint e = (bits >> 2u) & 31u;").ok();
         writeln!(out, "    uint m = bits & 3u;").ok();
         writeln!(out, "    float mag = (e < 1u) ? (float(m) * 0.0000152587890625)").ok();
-        writeln!(out, "              : ((1.0 + float(m) * 0.25) * exp2(float(int(e)) - 15.0));").ok();
+        writeln!(out, "              : ((1.0 + float(m) * 0.25) * exp2(float(int(e)) - 15.0));")
+            .ok();
         writeln!(out, "    return (((bits >> 7u) & 1u) != 0u) ? -mag : mag;").ok();
         writeln!(out, "}}").ok();
         writeln!(out, "float mt_decode_int8(uint bits) {{").ok();
@@ -325,7 +338,11 @@ impl GlslGenerator {
         writeln!(out, "float mt_erf(float x) {{").ok();
         writeln!(out, "    float t = 1.0 / (1.0 + 0.3275911 * abs(x));").ok();
         writeln!(out, "    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t)").ok();
-        writeln!(out, "        + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x*x);").ok();
+        writeln!(
+            out,
+            "        + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x*x);"
+        )
+        .ok();
         writeln!(out, "    return sign(x) * y;").ok();
         writeln!(out, "}}").ok();
         writeln!(out, "float mt_erfinv(float x) {{").ok();
@@ -551,12 +568,7 @@ impl GlslGenerator {
                     && let Some(Some(vid)) = blk.results.get(i)
                 {
                     let count = 64 * n_warps;
-                    writeln!(
-                        out,
-                        "shared float _SGM_{}[{count}];",
-                        vid.as_u32()
-                    )
-                    .ok();
+                    writeln!(out, "shared float _SGM_{}[{count}];", vid.as_u32()).ok();
                 }
             }
         }
@@ -569,10 +581,7 @@ impl GlslGenerator {
         // private array (declared inside `main()`), saving
         // `n_warps * m*n * 4` bytes of shared. The decl itself is emitted
         // in `emit_body`.
-        let local_c = matches!(
-            self.profile.mma,
-            crate::backend::MmaStrategy::SoftwareLocalC
-        );
+        let local_c = matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
         let mut seen_c: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for blk in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
             for op in &blk.ops {
@@ -594,12 +603,7 @@ impl GlslGenerator {
                         // subgroup-distributed registers (declared in
                         // emit_body) so its shared slot is skipped too.
                         if !((local_c || self.coopmat_on()) && pw) {
-                            writeln!(
-                                out,
-                                "shared float _CTC_{cnm}[{}];",
-                                mul * m * n
-                            )
-                            .ok();
+                            writeln!(out, "shared float _CTC_{cnm}[{}];", mul * m * n).ok();
                         }
                     }
                 }
@@ -610,11 +614,8 @@ impl GlslGenerator {
 
     fn emit_signature(&self, out: &mut String) {
         let [x, y, z] = self.local_size;
-        writeln!(
-            out,
-            "layout(local_size_x = {x}, local_size_y = {y}, local_size_z = {z}) in;",
-        )
-        .ok();
+        writeln!(out, "layout(local_size_x = {x}, local_size_y = {y}, local_size_z = {z}) in;",)
+            .ok();
         writeln!(out).ok();
         writeln!(out, "void main() {{").ok();
     }
@@ -626,13 +627,13 @@ impl GlslGenerator {
                 writeln!(out, "    if (_gtid >= pc._n_elems) return;").ok();
                 writeln!(out, "    uint tid = _gtid;").ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::Grid3D => {
                 writeln!(out, "    uint gid_x = gl_GlobalInvocationID.x;").ok();
                 writeln!(out, "    uint gid_y = gl_GlobalInvocationID.y;").ok();
                 writeln!(out, "    uint gid_z = gl_GlobalInvocationID.z;").ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::SimdGroup2D => {
                 // Apple `simdgroup`/`threadgroup_2d` mode — block IDs +
                 // local thread IDs both accessible. Mirrors the CUDA
@@ -645,7 +646,7 @@ impl GlslGenerator {
                 writeln!(out, "    uint lid_z = gl_LocalInvocationID.z;").ok();
                 writeln!(out, "    uint tid = gl_LocalInvocationIndex;").ok();
                 self.emit_simd_aliases(out);
-            }
+            },
             KernelMode::Reduction => {
                 // Block-per-output-row reduction. `tid` is the local
                 // 1-D thread index inside the workgroup; the per-axis
@@ -667,12 +668,12 @@ impl GlslGenerator {
                 // (see emit_simd_aliases).
                 writeln!(out, "    uint simd_lane  = tid % {lw}u;").ok();
                 writeln!(out, "    uint simd_group = tid / {lw}u;").ok();
-            }
+            },
             other => {
                 return Err(Error::UnsupportedOp(format!(
                     "spirv: KernelMode::{other:?} not yet supported"
                 )));
-            }
+            },
         }
         // SoftwareLocalC: declare per-warp lane-local C arrays inside
         // main(). Each lane holds `m*n / lane_width` floats; they
@@ -774,11 +775,8 @@ impl GlslGenerator {
     }
 
     fn child_ov(&self, parent: &Block, ov: &Names) -> Names {
-        let mut child: Names = parent
-            .names
-            .iter()
-            .map(|(&k, v)| (k, format!("v_{v}_{}", k.as_u32())))
-            .collect();
+        let mut child: Names =
+            parent.names.iter().map(|(&k, v)| (k, format!("v_{v}_{}", k.as_u32()))).collect();
         for (&k, v) in ov {
             child.insert(k, v.clone());
         }
@@ -802,9 +800,12 @@ impl GlslGenerator {
                 let v = self.vname(vid, block, ov);
                 let src = match kernel.mode {
                     KernelMode::Elementwise => "_gtid".to_string(),
-                    KernelMode::Grid3D => {
-                        match axis { 0 => "gid_x", 1 => "gid_y", _ => "gid_z" }.to_string()
+                    KernelMode::Grid3D => match axis {
+                        0 => "gid_x",
+                        1 => "gid_y",
+                        _ => "gid_z",
                     }
+                    .to_string(),
                     KernelMode::Reduction | KernelMode::SimdGroup2D => {
                         // SimdGroup2D: each workgroup processes one
                         // tile, so `program_id(axis)` returns the
@@ -812,15 +813,20 @@ impl GlslGenerator {
                         // TG saw tgid=0 and wrote on top of itself
                         // (the `fused/gather/masked/segmented/splitk_*`
                         // family cascade).
-                        match axis { 0 => "tgid_x", 1 => "tgid_y", _ => "tgid_z" }.to_string()
-                    }
+                        match axis {
+                            0 => "tgid_x",
+                            1 => "tgid_y",
+                            _ => "tgid_z",
+                        }
+                        .to_string()
+                    },
                     _ => "0u".to_string(),
                 };
                 writeln!(out, "{pad}uint {v} = {src};").ok();
                 if let Some(id) = vid {
                     types.insert(id, "uint");
                 }
-            }
+            },
             Op::Const { value } => {
                 let v = self.vname(vid, block, ov);
                 if *value >= 0 {
@@ -834,7 +840,7 @@ impl GlslGenerator {
                         types.insert(id, "int");
                     }
                 }
-            }
+            },
             Op::Load { src, indices, .. } => {
                 let v = self.vname(vid, block, ov);
                 let constexpr = kernel.constexprs.iter().find(|c| c.name.name() == src);
@@ -874,7 +880,9 @@ impl GlslGenerator {
                         _ => None,
                     } {
                         writeln!(out, "{pad}uint {v} = {b};").ok();
-                        if let Some(id) = vid { types.insert(id, "uint"); }
+                        if let Some(id) = vid {
+                            types.insert(id, "uint");
+                        }
                     } else if let Some(c) = constexpr {
                         // Constexpr at its declared dtype — integer
                         // constexprs MUST stay integer or every kernel
@@ -883,41 +891,49 @@ impl GlslGenerator {
                         match c.dtype {
                             DType::F32 => {
                                 writeln!(out, "{pad}float {v} = pc.{nm};").ok();
-                                if let Some(id) = vid { types.insert(id, "float"); }
-                            }
+                                if let Some(id) = vid {
+                                    types.insert(id, "float");
+                                }
+                            },
                             DType::U32 | DType::U16 | DType::U8 => {
                                 writeln!(out, "{pad}uint {v} = pc.{nm};").ok();
-                                if let Some(id) = vid { types.insert(id, "uint"); }
-                            }
+                                if let Some(id) = vid {
+                                    types.insert(id, "uint");
+                                }
+                            },
                             DType::I32 | DType::I8 | DType::I4 | DType::I64 => {
                                 writeln!(out, "{pad}int {v} = pc.{nm};").ok();
-                                if let Some(id) = vid { types.insert(id, "int"); }
-                            }
+                                if let Some(id) = vid {
+                                    types.insert(id, "int");
+                                }
+                            },
                             _ => {
                                 writeln!(out, "{pad}float {v} = float(pc.{nm});").ok();
-                                if let Some(id) = vid { types.insert(id, "float"); }
-                            }
+                                if let Some(id) = vid {
+                                    types.insert(id, "float");
+                                }
+                            },
                         }
                     } else if let Some(local_name) = src.strip_prefix("__ml_") {
                         // Mutable-local read. Use the declared type so
                         // `rem / extent` (uint local) stays uint.
                         let lt = local_types.get(local_name).copied().unwrap_or("float");
                         writeln!(out, "{pad}{lt} {v} = mt_loc_{local_name};").ok();
-                        if let Some(id) = vid { types.insert(id, lt); }
+                        if let Some(id) = vid {
+                            types.insert(id, lt);
+                        }
                     } else {
                         // Other no-index loads (special const literals
                         // like `-INFINITY`). Default to float.
                         writeln!(out, "{pad}float {v} = float({});", safe_glsl_ident(src)).ok();
-                        if let Some(id) = vid { types.insert(id, "float"); }
+                        if let Some(id) = vid {
+                            types.insert(id, "float");
+                        }
                     }
                 } else {
                     let idx = self.emit_idx(indices, block, ov, kernel, src)?;
                     let arr = safe_glsl_ident(src);
-                    let dtype = kernel
-                        .params
-                        .iter()
-                        .find(|p| p.name == *src)
-                        .map(|p| p.dtype);
+                    let dtype = kernel.params.iter().find(|p| p.name == *src).map(|p| p.dtype);
                     // Match the SSBO's natural type so bitwise ops on
                     // u32 packs (`val >> 8 & 255`) don't go through a
                     // float round-trip that loses bits. bf16 needs the
@@ -926,24 +942,33 @@ impl GlslGenerator {
                     // arithmetic stays in floating point.
                     match dtype {
                         Some(DType::BF16) => {
-                            writeln!(out, "{pad}float {v} = mt_bf16_to_f32({arr}[uint({idx})]);").ok();
-                            if let Some(id) = vid { types.insert(id, "float"); }
-                        }
+                            writeln!(out, "{pad}float {v} = mt_bf16_to_f32({arr}[uint({idx})]);")
+                                .ok();
+                            if let Some(id) = vid {
+                                types.insert(id, "float");
+                            }
+                        },
                         Some(DType::U32) | Some(DType::U16) | Some(DType::U8) => {
                             writeln!(out, "{pad}uint {v} = uint({arr}[uint({idx})]);").ok();
-                            if let Some(id) = vid { types.insert(id, "uint"); }
-                        }
+                            if let Some(id) = vid {
+                                types.insert(id, "uint");
+                            }
+                        },
                         Some(DType::I32) | Some(DType::I8) | Some(DType::I4) | Some(DType::I64) => {
                             writeln!(out, "{pad}int {v} = int({arr}[uint({idx})]);").ok();
-                            if let Some(id) = vid { types.insert(id, "int"); }
-                        }
+                            if let Some(id) = vid {
+                                types.insert(id, "int");
+                            }
+                        },
                         _ => {
                             writeln!(out, "{pad}float {v} = float({arr}[uint({idx})]);").ok();
-                            if let Some(id) = vid { types.insert(id, "float"); }
-                        }
+                            if let Some(id) = vid {
+                                types.insert(id, "float");
+                            }
+                        },
                     }
                 }
-            }
+            },
             Op::Store { dst, indices, value, .. } => {
                 let val = self.vname(Some(*value), block, ov);
                 let idx = self.emit_idx(indices, block, ov, kernel, dst)?;
@@ -956,11 +981,11 @@ impl GlslGenerator {
                     Some(dt) => {
                         let ty = Self::glsl_scalar_type(dt)?;
                         format!("{ty}({val})")
-                    }
+                    },
                     None => format!("float({val})"),
                 };
                 writeln!(out, "{pad}{arr}[uint({idx})] = {store_expr};").ok();
-            }
+            },
             Op::BinOp { op: bop, lhs, rhs } => {
                 let v = self.vname(vid, block, ov);
                 let l = self.vname(Some(*lhs), block, ov);
@@ -1024,19 +1049,19 @@ impl GlslGenerator {
                 if let Some(id) = vid {
                     types.insert(id, ty);
                 }
-            }
+            },
             Op::Fma { a, b, c } => {
                 let v = self.vname(vid, block, ov);
                 let av = self.vname(Some(*a), block, ov);
                 let bv = self.vname(Some(*b), block, ov);
                 let cv = self.vname(Some(*c), block, ov);
                 writeln!(out, "{pad}float {v} = fma({av}, {bv}, {cv});").ok();
-            }
+            },
             Op::UnaryOp { op: uop, value } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}float {v} = {};", self.glsl_unary(*uop, &rv)).ok();
-            }
+            },
             Op::Cast { value, dtype } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -1048,18 +1073,24 @@ impl GlslGenerator {
                 match dtype {
                     DType::U32 | DType::U16 | DType::U8 => {
                         writeln!(out, "{pad}uint {v} = uint({rv});").ok();
-                        if let Some(id) = vid { types.insert(id, "uint"); }
-                    }
+                        if let Some(id) = vid {
+                            types.insert(id, "uint");
+                        }
+                    },
                     DType::I32 | DType::I8 | DType::I4 | DType::I64 => {
                         writeln!(out, "{pad}int {v} = int({rv});").ok();
-                        if let Some(id) = vid { types.insert(id, "int"); }
-                    }
+                        if let Some(id) = vid {
+                            types.insert(id, "int");
+                        }
+                    },
                     _ => {
                         writeln!(out, "{pad}float {v} = float({rv});").ok();
-                        if let Some(id) = vid { types.insert(id, "float"); }
-                    }
+                        if let Some(id) = vid {
+                            types.insert(id, "float");
+                        }
+                    },
                 }
-            }
+            },
             Op::Select { cond, on_true, on_false } => {
                 let v = self.vname(vid, block, ov);
                 let c = self.vname(Some(*cond), block, ov);
@@ -1077,8 +1108,10 @@ impl GlslGenerator {
                     "float"
                 };
                 writeln!(out, "{pad}{ty} {v} = ((bool({c})) ? ({a}) : ({b}));").ok();
-                if let Some(id) = vid { types.insert(id, ty); }
-            }
+                if let Some(id) = vid {
+                    types.insert(id, ty);
+                }
+            },
             Op::DeclareLocal { name, value } => {
                 let rv = self.vname(Some(*value), block, ov);
                 // Type-aware declaration. `let mut rem = p` for uint
@@ -1087,7 +1120,7 @@ impl GlslGenerator {
                 let ty = types.get(value).copied().unwrap_or("float");
                 writeln!(out, "{pad}{ty} mt_loc_{name} = {rv};").ok();
                 local_types.insert(name.clone(), ty);
-            }
+            },
             Op::SetLocal { name, value } => {
                 let rv = self.vname(Some(*value), block, ov);
                 let lt = local_types.get(name).copied().unwrap_or("float");
@@ -1097,7 +1130,7 @@ impl GlslGenerator {
                 } else {
                     writeln!(out, "{pad}mt_loc_{name} = {lt}({rv});").ok();
                 }
-            }
+            },
             Op::Activation { kind, value } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -1109,12 +1142,20 @@ impl GlslGenerator {
                     ActKind::Tanh => format!("tanh({rv})"),
                 };
                 writeln!(out, "{pad}float {v} = {expr};").ok();
-            }
+            },
             // Per-thread grid-stride accumulation. For Reduction mode the
             // threadgroup cooperates (each thread strides by `lsize`); for
             // Grid3D each thread folds its own run (stride from the IR).
             Op::StrideReduce {
-                src, offset, stride, end, op: rk, transform, secondary_src, secondary_base, ..
+                src,
+                offset,
+                stride,
+                end,
+                op: rk,
+                transform,
+                secondary_src,
+                secondary_base,
+                ..
             } => {
                 let v = self.vname(vid, block, ov);
                 let off = self.vname(Some(*offset), block, ov);
@@ -1146,18 +1187,15 @@ impl GlslGenerator {
                     Some(sec) => {
                         let bv = self.vname(*secondary_base, block, ov);
                         let sec_arr = safe_glsl_ident(sec);
-                        let sec_dtype = kernel
-                            .params
-                            .iter()
-                            .find(|p| p.name == *sec)
-                            .map(|p| p.dtype);
+                        let sec_dtype =
+                            kernel.params.iter().find(|p| p.name == *sec).map(|p| p.dtype);
                         let load_sec = if matches!(sec_dtype, Some(DType::BF16)) {
                             format!("mt_bf16_to_f32({sec_arr}[uint(_i) - uint({bv})])")
                         } else {
                             format!("float({sec_arr}[uint(_i) - uint({bv})])")
                         };
                         format!("{} * {load_sec}", load_src("_i"))
-                    }
+                    },
                     None => load_src("_i"),
                 };
                 let elem_expr = match transform.as_ref().map(|t| t.as_slice()) {
@@ -1177,7 +1215,7 @@ impl GlslGenerator {
                                 Op::Cast { dtype, .. } => {
                                     let ty = Self::glsl_scalar_type(*dtype)?;
                                     format!("{ty}({e})")
-                                }
+                                },
                                 Op::BinOp { op, rhs, .. } => {
                                     let rv = self.vname(Some(*rhs), block, ov);
                                     match op {
@@ -1187,23 +1225,20 @@ impl GlslGenerator {
                                         BinOpKind::Div => format!("(({e}) / float({rv}))"),
                                         _ => e,
                                     }
-                                }
+                                },
                                 _ => e,
                             };
                         }
                         e
-                    }
+                    },
                 };
                 writeln!(out, "{pad}float {v} = {};", reduce_init(*rk)).ok();
-                writeln!(
-                    out,
-                    "{pad}for (uint _i = {start}; _i < uint({en}); _i += {step}) {{"
-                )
-                .ok();
+                writeln!(out, "{pad}for (uint _i = {start}; _i < uint({en}); _i += {step}) {{")
+                    .ok();
                 writeln!(out, "{pad}    float _e = {elem_expr};").ok();
                 writeln!(out, "{pad}    {v} = {};", reduce_combine(*rk, &v, "_e")).ok();
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // Workgroup-shared barrier-tree reduction — subgroup-width
             // agnostic (depends only on `local_size_x` + `barrier()`).
             // This is the portable path called out in
@@ -1224,7 +1259,7 @@ impl GlslGenerator {
                         return Err(Error::UnsupportedOp(
                             "spirv: Reduce without a result value".into(),
                         ));
-                    }
+                    },
                 };
                 let ls = self.local_size_total();
                 writeln!(out, "{pad}{red}[tid] = ({input});").ok();
@@ -1236,11 +1271,7 @@ impl GlslGenerator {
                 // drops upper-partial lanes and loses ~1/3 of the reduction.
                 // No-op for power-of-two ls (tid+_s<ls is then always true).
                 let np = (ls as u64).next_power_of_two();
-                writeln!(
-                    out,
-                    "{pad}for (uint _s = {np}u / 2u; _s > 0u; _s >>= 1) {{"
-                )
-                .ok();
+                writeln!(out, "{pad}for (uint _s = {np}u / 2u; _s > 0u; _s >>= 1) {{").ok();
                 writeln!(out, "{pad}    if (tid < _s && tid + _s < {ls}u) {{").ok();
                 let combine =
                     reduce_combine(*rk, &format!("{red}[tid]"), &format!("{red}[tid + _s]"));
@@ -1249,26 +1280,25 @@ impl GlslGenerator {
                 writeln!(out, "{pad}    barrier();").ok();
                 writeln!(out, "{pad}}}").ok();
                 if *rk == ReduceKind::Mean {
-                    writeln!(
-                        out,
-                        "{pad}float {v} = {red}[0] / float({ls});"
-                    )
-                    .ok();
+                    writeln!(out, "{pad}float {v} = {red}[0] / float({ls});").ok();
                 } else {
                     writeln!(out, "{pad}float {v} = {red}[0];").ok();
                 }
-            }
+            },
             // Threadgroup memory: declarations hoisted to file scope by
             // emit_shared_arrays; the ops themselves are loads/stores.
-            Op::ThreadgroupAlloc { .. } => {} // no-op (hoisted)
+            Op::ThreadgroupAlloc { .. } => {}, // no-op (hoisted)
             Op::ThreadgroupLoad { name, index } => {
                 let v = self.vname(vid, block, ov);
                 let iv = self.vname(Some(*index), block, ov);
                 let n = safe_glsl_ident(name);
-                let (ty, expr) = dtype_load(tg_alloc_dtype(kernel, name), &format!("{n}[uint({iv})]"));
+                let (ty, expr) =
+                    dtype_load(tg_alloc_dtype(kernel, name), &format!("{n}[uint({iv})]"));
                 writeln!(out, "{pad}{ty} {v} = {expr};").ok();
-                if let Some(id) = vid { types.insert(id, ty); }
-            }
+                if let Some(id) = vid {
+                    types.insert(id, ty);
+                }
+            },
             Op::ThreadgroupStore { name, index, value } => {
                 let iv = self.vname(Some(*index), block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -1279,14 +1309,14 @@ impl GlslGenerator {
                 let val = match dt {
                     Some(DType::U32) | Some(DType::U16) | Some(DType::U8) => {
                         format!("uint({rv})")
-                    }
+                    },
                     Some(DType::I32) | Some(DType::I8) | Some(DType::I4) | Some(DType::I64) => {
                         format!("int({rv})")
-                    }
+                    },
                     _ => format!("{rv}"),
                 };
                 writeln!(out, "{pad}{n}[uint({iv})] = {val};").ok();
-            }
+            },
             // Per-thread (local) array — GLSL declares it in main.
             Op::StackAlloc { dtype, size, name } => {
                 let ty = match dtype {
@@ -1297,24 +1327,27 @@ impl GlslGenerator {
                 };
                 let n = safe_glsl_ident(name);
                 writeln!(out, "{pad}{ty} {n}[{size}];").ok();
-            }
+            },
             Op::StackLoad { name, index } => {
                 let v = self.vname(vid, block, ov);
                 let iv = self.vname(Some(*index), block, ov);
                 let n = safe_glsl_ident(name);
-                let (ty, expr) = dtype_load(stack_alloc_dtype(kernel, name), &format!("{n}[uint({iv})]"));
+                let (ty, expr) =
+                    dtype_load(stack_alloc_dtype(kernel, name), &format!("{n}[uint({iv})]"));
                 writeln!(out, "{pad}{ty} {v} = {expr};").ok();
-                if let Some(id) = vid { types.insert(id, ty); }
-            }
+                if let Some(id) = vid {
+                    types.insert(id, ty);
+                }
+            },
             Op::StackStore { name, index, value } => {
                 let iv = self.vname(Some(*index), block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 let n = safe_glsl_ident(name);
                 writeln!(out, "{pad}{n}[uint({iv})] = {rv};").ok();
-            }
+            },
             Op::Barrier => {
                 writeln!(out, "{pad}barrier();").ok();
-            }
+            },
             // ── Subgroup (simdgroup / warp) primitives ────────────────
             // Vulkan calls the warp-level group the "subgroup"; on RDNA
             // 4 wave32, subgroup size = 32 = profile.lane_width. We use
@@ -1342,7 +1375,7 @@ impl GlslGenerator {
                     let lw = self.profile.lane_width;
                     writeln!(out, "{pad}{v} = {v} / {lw}.0;").ok();
                 }
-            }
+            },
             Op::SimdScan { value, op: rk, exclusive } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
@@ -1354,35 +1387,39 @@ impl GlslGenerator {
                     ReduceKind::Product => format!("subgroup{prefix}Mul"),
                 };
                 writeln!(out, "{pad}float {v} = {intrin}({rv});").ok();
-            }
+            },
             Op::SimdLaneId => {
                 let v = self.vname(vid, block, ov);
                 // Use the preamble's `simd_lane` (`tid % 32`) so this
                 // matches the simdgroup-matrix lane→element mapping.
                 writeln!(out, "{pad}uint {v} = simd_lane;").ok();
-                if let Some(id) = vid { types.insert(id, "uint"); }
-            }
+                if let Some(id) = vid {
+                    types.insert(id, "uint");
+                }
+            },
             Op::SimdGroupId => {
                 let v = self.vname(vid, block, ov);
                 // Same — `simd_group` from the preamble (`tid / 32`)
                 // matches the shared simdgroup-matrix tile offset.
                 writeln!(out, "{pad}uint {v} = simd_group;").ok();
-                if let Some(id) = vid { types.insert(id, "uint"); }
-            }
+                if let Some(id) = vid {
+                    types.insert(id, "uint");
+                }
+            },
             Op::SimdBroadcast { value, lane } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 let rl = self.vname(Some(*lane), block, ov);
                 writeln!(out, "{pad}float {v} = subgroupBroadcast({rv}, uint({rl}));").ok();
-            }
+            },
             Op::SimdShuffleXor { value, mask } => {
                 let v = self.vname(vid, block, ov);
                 let rv = self.vname(Some(*value), block, ov);
                 writeln!(out, "{pad}float {v} = subgroupShuffleXor({rv}, {mask}u);").ok();
-            }
+            },
             Op::SimdgroupBarrier => {
                 writeln!(out, "{pad}subgroupMemoryBarrierShared(); subgroupBarrier();").ok();
-            }
+            },
             // Atomic ops on storage buffers — GLSL has direct intrinsics.
             // `Op::Atomic` is the IR's portable atomic-RMW; for f32 sums
             // we need `atomicAdd` on `float` which requires
@@ -1417,7 +1454,7 @@ impl GlslGenerator {
                     _ => format!("{rv}"),
                 };
                 writeln!(out, "{pad}{f}({arr}[uint({iv})], {val_cast});").ok();
-            }
+            },
             // ── simdgroup_matrix<f32,8,8> software emulation ─────────────
             // Apple's per-warp 8×8 float fragment. The CUDA emitter
             // already does the software emulation (each warp owns a
@@ -1427,27 +1464,19 @@ impl GlslGenerator {
             //
             // The shared declaration is hoisted by `emit_shared_arrays`
             // (added below); per-op handlers only emit the access.
-            Op::SimdgroupAlloc { .. } => {} // declared at file scope
+            Op::SimdgroupAlloc { .. } => {}, // declared at file scope
             Op::SimdgroupElemLoad { value, index } => {
                 let v = self.vname(vid, block, ov);
                 let m = sgm_name(*value);
                 let fnk = if *index == 0 { "_sg_fn0" } else { "_sg_fn1" };
-                writeln!(
-                    out,
-                    "{pad}float {v} = {m}[simd_group * 64u + _sg_fm * 8u + {fnk}];"
-                )
-                .ok();
-            }
+                writeln!(out, "{pad}float {v} = {m}[simd_group * 64u + _sg_fm * 8u + {fnk}];").ok();
+            },
             Op::SimdgroupElemStore { value, index, data } => {
                 let m = sgm_name(*value);
                 let dv = self.vname(Some(*data), block, ov);
                 let fnk = if *index == 0 { "_sg_fn0" } else { "_sg_fn1" };
-                writeln!(
-                    out,
-                    "{pad}{m}[simd_group * 64u + _sg_fm * 8u + {fnk}] = {dv};"
-                )
-                .ok();
-            }
+                writeln!(out, "{pad}{m}[simd_group * 64u + _sg_fm * 8u + {fnk}] = {dv};").ok();
+            },
             Op::SimdgroupLoad { dest, tg, offset, stride, transpose } => {
                 let m = sgm_name(*dest);
                 // Threadgroup arrays are DECLARED under safe_glsl_ident
@@ -1469,12 +1498,12 @@ impl GlslGenerator {
                     .ok();
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // ── CoopTile cooperative GEMM (software emulation) ──────────
             // Mirrors the CUDA emitter's `mpp::matmul2d` software path,
             // adapted to GLSL.  Per-warp A/B/C shared tiles are hoisted
             // by emit_shared_arrays; ops here are loads / runs / stores.
-            Op::CoopTileSetup { .. } => {} // declared at file scope
+            Op::CoopTileSetup { .. } => {}, // declared at file scope
             Op::CoopTileZero { name } => {
                 let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name).ok_or_else(|| {
                     Error::UnsupportedOp(format!("spirv: CoopTile `{name}` no Setup"))
@@ -1489,10 +1518,8 @@ impl GlslGenerator {
                     writeln!(out, "{pad}    _CMAcc_{cnm}[_mi][_ni] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);").ok();
                     return Ok(());
                 }
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     let lw = self.profile.lane_width;
                     let per_lane = (m * n).div_ceil(lw).max(1);
@@ -1511,7 +1538,7 @@ impl GlslGenerator {
                     )
                     .ok();
                 }
-            }
+            },
             Op::CoopTileLoadA { name, ptr_name, ptr_offset, dtype: _, ei, .. } => {
                 let (m, _, k, ta, _, _, _, simd) =
                     self.coop_cfg(kernel, name).ok_or_else(|| {
@@ -1537,7 +1564,7 @@ impl GlslGenerator {
                     m * k
                 )
                 .ok();
-            }
+            },
             Op::CoopTileLoadB { name, ptr_name, ptr_offset, dtype: _, ei, .. } => {
                 let (_, n, k, _, tb, _, _, simd) =
                     self.coop_cfg(kernel, name).ok_or_else(|| {
@@ -1562,7 +1589,7 @@ impl GlslGenerator {
                     k * n
                 )
                 .ok();
-            }
+            },
             Op::CoopTileRun { name, .. } => {
                 let (m, n, k, _, _, _, accum, simd) =
                     self.coop_cfg(kernel, name).ok_or_else(|| {
@@ -1582,16 +1609,22 @@ impl GlslGenerator {
                     let mf = (m / 16).max(1);
                     let nf = (n / 16).max(1);
                     let kf = (k / 16).max(1);
-                    let ba = coop_base_glsl(true, m * k);
-                    let bb = coop_base_glsl(true, k * n);
+                    let base_a = coop_base_glsl(true, m * k);
+                    let base_b = coop_base_glsl(true, k * n);
                     writeln!(out, "{pad}barrier();").ok();
-                    writeln!(out, "{pad}[[unroll]] for (uint _kt = 0u; _kt < {kf}u; _kt++) {{").ok();
-                    writeln!(out, "{pad}    [[unroll]] for (uint _mi = 0u; _mi < {mf}u; _mi++) {{").ok();
+                    writeln!(out, "{pad}[[unroll]] for (uint _kt = 0u; _kt < {kf}u; _kt++) {{")
+                        .ok();
+                    writeln!(out, "{pad}    [[unroll]] for (uint _mi = 0u; _mi < {mf}u; _mi++) {{")
+                        .ok();
                     writeln!(out, "{pad}        coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> _ca;").ok();
-                    writeln!(out, "{pad}        coopMatLoad(_ca, _CTA_{nm}, {ba} + (_mi * 16u) * {k}u + _kt * 16u, {k}u, gl_CooperativeMatrixLayoutRowMajor);").ok();
-                    writeln!(out, "{pad}        [[unroll]] for (uint _ni = 0u; _ni < {nf}u; _ni++) {{").ok();
+                    writeln!(out, "{pad}        coopMatLoad(_ca, _CTA_{nm}, {base_a} + (_mi * 16u) * {k}u + _kt * 16u, {k}u, gl_CooperativeMatrixLayoutRowMajor);").ok();
+                    writeln!(
+                        out,
+                        "{pad}        [[unroll]] for (uint _ni = 0u; _ni < {nf}u; _ni++) {{"
+                    )
+                    .ok();
                     writeln!(out, "{pad}            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> _cb;").ok();
-                    writeln!(out, "{pad}            coopMatLoad(_cb, _CTB_{nm}, {bb} + (_kt * 16u) * {n}u + _ni * 16u, {n}u, gl_CooperativeMatrixLayoutRowMajor);").ok();
+                    writeln!(out, "{pad}            coopMatLoad(_cb, _CTB_{nm}, {base_b} + (_kt * 16u) * {n}u + _ni * 16u, {n}u, gl_CooperativeMatrixLayoutRowMajor);").ok();
                     writeln!(out, "{pad}            _CMAcc_{cnm}[_mi][_ni] = coopMatMulAdd(_ca, _cb, _CMAcc_{cnm}[_mi][_ni]);").ok();
                     writeln!(out, "{pad}        }}").ok();
                     writeln!(out, "{pad}    }}").ok();
@@ -1599,62 +1632,48 @@ impl GlslGenerator {
                     writeln!(out, "{pad}barrier();").ok();
                     return Ok(());
                 }
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     let lw = self.profile.lane_width;
                     let per_lane = (m * n).div_ceil(lw).max(1);
-                    let ba = coop_base_glsl(true, m * k);
-                    let bb = coop_base_glsl(true, k * n);
+                    let base_a = coop_base_glsl(true, m * k);
+                    let base_b = coop_base_glsl(true, k * n);
                     writeln!(out, "{pad}barrier();").ok();
-                    writeln!(
-                        out,
-                        "{pad}for (uint _li = 0u; _li < {per_lane}u; _li++) {{"
-                    )
-                    .ok();
+                    writeln!(out, "{pad}for (uint _li = 0u; _li < {per_lane}u; _li++) {{").ok();
                     writeln!(out, "{pad}    uint _e = simd_lane + _li * {lw}u;").ok();
                     writeln!(out, "{pad}    if (_e >= {}u) break;", m * n).ok();
                     writeln!(out, "{pad}    uint _i = _e / {n}u, _j = _e % {n}u;").ok();
-                    let init = if accum {
-                        format!("_CTC_lane_{cnm}[_li]")
-                    } else {
-                        "0.0".to_string()
-                    };
+                    let init =
+                        if accum { format!("_CTC_lane_{cnm}[_li]") } else { "0.0".to_string() };
                     writeln!(out, "{pad}    float _acc = {init};").ok();
-                    writeln!(out, "{pad}    for (uint _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{ba} + _i * {k}u + _l] * _CTB_{nm}[{bb} + _l * {n}u + _j];").ok();
+                    writeln!(out, "{pad}    for (uint _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{base_a} + _i * {k}u + _l] * _CTB_{nm}[{base_b} + _l * {n}u + _j];").ok();
                     writeln!(out, "{pad}    _CTC_lane_{cnm}[_li] = _acc;").ok();
                     writeln!(out, "{pad}}}").ok();
                     writeln!(out, "{pad}barrier();").ok();
                 } else {
                     let (sid, ssize, _) = coop_scope_glsl(simd, self.profile.lane_width);
-                    let (ba, bb, bc) = (
+                    let (base_a, base_b, bc) = (
                         coop_base_glsl(simd, m * k),
                         coop_base_glsl(simd, k * n),
                         coop_base_glsl(simd, m * n),
                     );
                     writeln!(out, "{pad}barrier();").ok();
-                    writeln!(
-                        out,
-                        "{pad}for (uint _e = {sid}; _e < {}u; _e += {ssize}) {{",
-                        m * n
-                    )
-                    .ok();
+                    writeln!(out, "{pad}for (uint _e = {sid}; _e < {}u; _e += {ssize}) {{", m * n)
+                        .ok();
                     writeln!(out, "{pad}    uint _i = _e / {n}u, _j = _e % {n}u;").ok();
                     let init = if accum { format!("_CTC_{cnm}[{bc} + _e]") } else { "0.0".into() };
                     writeln!(out, "{pad}    float _acc = {init};").ok();
-                    writeln!(out, "{pad}    for (uint _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{ba} + _i * {k}u + _l] * _CTB_{nm}[{bb} + _l * {n}u + _j];").ok();
+                    writeln!(out, "{pad}    for (uint _l = 0u; _l < {k}u; _l++) _acc += _CTA_{nm}[{base_a} + _i * {k}u + _l] * _CTB_{nm}[{base_b} + _l * {n}u + _j];").ok();
                     writeln!(out, "{pad}    _CTC_{cnm}[{bc} + _e] = _acc;").ok();
                     writeln!(out, "{pad}}}").ok();
                     writeln!(out, "{pad}barrier();").ok();
                 }
-            }
+            },
             Op::CoopTileStoreC { name, ptr_name, ptr_offset, dtype: _, ei, .. } => {
-                let (m, n, _, _, _, _, _, simd) =
-                    self.coop_cfg(kernel, name).ok_or_else(|| {
-                        Error::UnsupportedOp(format!("spirv: CoopTile `{name}` no Setup"))
-                    })?;
+                let (m, n, _, _, _, _, _, simd) = self.coop_cfg(kernel, name).ok_or_else(|| {
+                    Error::UnsupportedOp(format!("spirv: CoopTile `{name}` no Setup"))
+                })?;
                 let cnm = ct_ident(&coop_c_name(name));
                 let off = ptr_offset
                     .map(|o| self.vname(Some(o), block, ov))
@@ -1672,10 +1691,8 @@ impl GlslGenerator {
                     writeln!(out, "{pad}    coopMatStore(_CMAcc_{cnm}[_mi][_ni], {arr}, uint({off}) + (_mi * 16u) * {ei}u + _ni * 16u, {ei}u, gl_CooperativeMatrixLayoutRowMajor);").ok();
                     return Ok(());
                 }
-                let local_c = matches!(
-                    self.profile.mma,
-                    crate::backend::MmaStrategy::SoftwareLocalC
-                );
+                let local_c =
+                    matches!(self.profile.mma, crate::backend::MmaStrategy::SoftwareLocalC);
                 if local_c && simd {
                     let lw = self.profile.lane_width;
                     let per_lane = (m * n).div_ceil(lw).max(1);
@@ -1683,7 +1700,11 @@ impl GlslGenerator {
                     writeln!(out, "{pad}for (uint _li = 0u; _li < {per_lane}u; _li++) {{").ok();
                     writeln!(out, "{pad}    uint _e = simd_lane + _li * {lw}u;").ok();
                     writeln!(out, "{pad}    if (_e >= {}u) break;", m * n).ok();
-                    writeln!(out, "{pad}    {arr}[uint({off}) + {dst}] = float(_CTC_lane_{cnm}[_li]);").ok();
+                    writeln!(
+                        out,
+                        "{pad}    {arr}[uint({off}) + {dst}] = float(_CTC_lane_{cnm}[_li]);"
+                    )
+                    .ok();
                     writeln!(out, "{pad}}}").ok();
                 } else {
                     let (sid, ssize, _) = coop_scope_glsl(simd, self.profile.lane_width);
@@ -1696,7 +1717,7 @@ impl GlslGenerator {
                     )
                     .ok();
                 }
-            }
+            },
             Op::SimdgroupMatMul { a, b, c } => {
                 let (ma, mb, mc) = (sgm_name(*a), sgm_name(*b), sgm_name(*c));
                 writeln!(out, "{pad}subgroupMemoryBarrierShared(); subgroupBarrier();").ok();
@@ -1712,7 +1733,7 @@ impl GlslGenerator {
                 writeln!(out, "{pad}    {mc}[_bs + _sg_fm * 8u + _sg_fn0] = _acc0;").ok();
                 writeln!(out, "{pad}    {mc}[_bs + _sg_fm * 8u + _sg_fn1] = _acc1;").ok();
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // Control flow — nested-block recursion mirroring the CUDA walker.
             Op::Loop { var, start, end, step, body } => {
                 let s = self.vname(Some(*start), block, ov);
@@ -1728,7 +1749,7 @@ impl GlslGenerator {
                     "{pad}for (uint {lv} = uint({s}); {lv} < uint({e}); {lv} += uint({st})) {{"
                 )
                 .ok();
-                if let Some(bb) = kernel.blocks.get(body) {
+                if let Some(base_b) = kernel.blocks.get(body) {
                     let mut child = self.child_ov(block, ov);
                     // The macro encodes the loop induction var under TWO
                     // magic ValueIds (see msl emit_block).
@@ -1739,10 +1760,10 @@ impl GlslGenerator {
                     // right type.
                     types.insert(ValueId::new(0xC000_0000 | var.as_u32()), "uint");
                     types.insert(ValueId::new(var.as_u32() + 0x4000_0000), "uint");
-                    self.emit_ops(bb, kernel, &child, types, local_types, out)?;
+                    self.emit_ops(base_b, kernel, &child, types, local_types, out)?;
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             Op::If { cond, then_block, else_block } => {
                 let c = self.vname(Some(*cond), block, ov);
                 writeln!(out, "{pad}if (bool({c})) {{").ok();
@@ -1758,22 +1779,22 @@ impl GlslGenerator {
                     }
                 }
                 writeln!(out, "{pad}}}").ok();
-            }
+            },
             // Scalar zero / splat.
             Op::Zeros { shape, .. } if shape.rank() == 0 => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}float {v} = 0.0;").ok();
-            }
+            },
             Op::Splat { value, shape, .. } if shape.rank() == 0 => {
                 let v = self.vname(vid, block, ov);
                 writeln!(out, "{pad}float {v} = float({value});").ok();
-            }
+            },
             other => {
                 return Err(Error::UnsupportedOp(format!(
                     "spirv: op {} not yet supported",
                     op_variant_name(other)
                 )));
-            }
+            },
         }
         Ok(())
     }
@@ -1934,12 +1955,10 @@ fn stack_alloc_dtype(kernel: &Kernel, name: &str) -> Option<DType> {
 /// by ThreadgroupLoad / StackLoad. Returns `(glsl_type, expr_around_arr)`.
 fn dtype_load(dtype: Option<DType>, arr_idx: &str) -> (&'static str, String) {
     match dtype {
-        Some(DType::U32) | Some(DType::U16) | Some(DType::U8) => {
-            ("uint", format!("uint({arr_idx})"))
-        }
-        Some(DType::I32) | Some(DType::I8) | Some(DType::I4) | Some(DType::I64) => {
-            ("int", format!("int({arr_idx})"))
-        }
+        Some(DType::U32) | Some(DType::U16) | Some(DType::U8) =>
+            ("uint", format!("uint({arr_idx})")),
+        Some(DType::I32) | Some(DType::I8) | Some(DType::I4) | Some(DType::I64) =>
+            ("int", format!("int({arr_idx})")),
         _ => ("float", format!("float({arr_idx})")),
     }
 }
@@ -1952,14 +1971,10 @@ fn sgm_name(v: ValueId) -> String { format!("_SGM_{}", v.as_u32()) }
 /// CoopTile name sanitization, matches the CUDA emitter so the shared
 /// arrays line up by spelling.
 fn ct_ident(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-        .collect()
+    name.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' }).collect()
 }
 
-fn coop_c_name(name: &str) -> String {
-    name.strip_suffix("_acc").unwrap_or(name).to_string()
-}
+fn coop_c_name(name: &str) -> String { name.strip_suffix("_acc").unwrap_or(name).to_string() }
 
 /// `(thread-id, scope-size, barrier)` for a cooperative iteration in
 /// GLSL — same shape as the CUDA helper but with `subgroupBarrier()`.
@@ -1972,11 +1987,7 @@ fn coop_scope_glsl(simd: bool, lane_width: u32) -> (&'static str, String, &'stat
 }
 
 fn coop_base_glsl(simd: bool, tile: u32) -> String {
-    if simd {
-        format!("simd_group * {tile}u")
-    } else {
-        "0u".to_string()
-    }
+    if simd { format!("simd_group * {tile}u") } else { "0u".to_string() }
 }
 
 /// Does the kernel use any simdgroup-matrix op (drives the lane-coord
@@ -2019,39 +2030,126 @@ pub fn safe_glsl_ident(name: &str) -> String {
     // likely to hit. Not exhaustive — the compiler will catch anything we
     // miss, and we can grow this on demand.
     const RESERVED: &[&str] = &[
-        "in", "out", "inout", "uniform", "buffer", "shared",
-        "const", "void", "bool", "int", "uint", "float", "double",
-        "vec2", "vec3", "vec4", "mat2", "mat3", "mat4",
-        "true", "false", "if", "else", "for", "while", "do", "switch", "case",
-        "return", "break", "continue", "discard",
-        "layout", "precision", "highp", "mediump", "lowp",
-        "attribute", "varying",
-        "centroid", "flat", "smooth", "noperspective",
-        "coherent", "volatile", "restrict", "readonly", "writeonly",
-        "sampler1D", "sampler2D", "sampler3D", "samplerCube",
-        "image1D", "image2D", "image3D",
+        "in",
+        "out",
+        "inout",
+        "uniform",
+        "buffer",
+        "shared",
+        "const",
+        "void",
+        "bool",
+        "int",
+        "uint",
+        "float",
+        "double",
+        "vec2",
+        "vec3",
+        "vec4",
+        "mat2",
+        "mat3",
+        "mat4",
+        "true",
+        "false",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "switch",
+        "case",
+        "return",
+        "break",
+        "continue",
+        "discard",
+        "layout",
+        "precision",
+        "highp",
+        "mediump",
+        "lowp",
+        "attribute",
+        "varying",
+        "centroid",
+        "flat",
+        "smooth",
+        "noperspective",
+        "coherent",
+        "volatile",
+        "restrict",
+        "readonly",
+        "writeonly",
+        "sampler1D",
+        "sampler2D",
+        "sampler3D",
+        "samplerCube",
+        "image1D",
+        "image2D",
+        "image3D",
         // GLSL reserves these for future use, even though they aren't
         // currently used; shaderc rejects them. The corpus hit them on
         // conv* / depthwise_conv2d / aura_value_int4 / ffai_gemm kernels.
-        "input", "output", "texture", "image", "sampler",
-        "active", "partition", "common", "filter",
-        "row_major", "column_major", "packed",
-        "asm", "class", "template", "this", "namespace", "interface",
-        "public", "static", "extern", "external",
-        "long", "short", "half", "fixed", "unsigned",
-        "hvec2", "hvec3", "hvec4", "fvec2", "fvec3", "fvec4",
-        "dvec2", "dvec3", "dvec4", "ivec2", "ivec3", "ivec4",
-        "uvec2", "uvec3", "uvec4", "bvec2", "bvec3", "bvec4",
-        "snorm", "unorm", "snorm8", "unorm8",
+        "input",
+        "output",
+        "texture",
+        "image",
+        "sampler",
+        "active",
+        "partition",
+        "common",
+        "filter",
+        "row_major",
+        "column_major",
+        "packed",
+        "asm",
+        "class",
+        "template",
+        "this",
+        "namespace",
+        "interface",
+        "public",
+        "static",
+        "extern",
+        "external",
+        "long",
+        "short",
+        "half",
+        "fixed",
+        "unsigned",
+        "hvec2",
+        "hvec3",
+        "hvec4",
+        "fvec2",
+        "fvec3",
+        "fvec4",
+        "dvec2",
+        "dvec3",
+        "dvec4",
+        "ivec2",
+        "ivec3",
+        "ivec4",
+        "uvec2",
+        "uvec3",
+        "uvec4",
+        "bvec2",
+        "bvec3",
+        "bvec4",
+        "snorm",
+        "unorm",
+        "snorm8",
+        "unorm8",
         // GLSL built-in functions / common names that surface as params:
-        "length", "distance", "dot", "cross", "normalize", "reflect",
-        "refract", "transpose", "determinant", "inverse",
+        "length",
+        "distance",
+        "dot",
+        "cross",
+        "normalize",
+        "reflect",
+        "refract",
+        "transpose",
+        "determinant",
+        "inverse",
     ];
-    if RESERVED.contains(&name) {
-        format!("_b_{name}")
-    } else {
-        name.to_string()
-    }
+    if RESERVED.contains(&name) { format!("_b_{name}") } else { name.to_string() }
 }
 
 impl CodegenBackend for GlslGenerator {
@@ -2063,10 +2161,9 @@ impl CodegenBackend for GlslGenerator {
         // Run the same backend-neutral kernel-inline pass the CUDA emitter
         // does, so cross-kernel calls resolve in this codegen too.
         let mut inlined = kernel.clone();
-        let k: &Kernel = match crate::passes::run_passes(
-            &mut inlined,
-            &[Box::new(crate::passes::kernel_inline::KernelInlinePass)],
-        ) {
+        let k: &Kernel = match crate::passes::run_passes(&mut inlined, &[Box::new(
+            crate::passes::kernel_inline::KernelInlinePass,
+        )]) {
             Ok(()) => &inlined,
             Err(_) => kernel,
         };
@@ -2162,8 +2259,16 @@ mod tests {
         constexpr::ConstExpr,
         dtype::DType,
         ir::{
-            BinOpKind, ConstExprDecl, IndexExpr, Kernel, KernelMode, Op, Param, ParamKind,
-            ReduceKind, ValueId,
+            BinOpKind,
+            ConstExprDecl,
+            IndexExpr,
+            Kernel,
+            KernelMode,
+            Op,
+            Param,
+            ParamKind,
+            ReduceKind,
+            ValueId,
         },
         shape::Shape,
     };
@@ -2184,12 +2289,22 @@ mod tests {
         k.body.push_op(Op::ProgramId { axis: 0 }, ValueId::new(0));
         k.body.name_value(ValueId::new(0), "idx");
         k.body.push_op(
-            Op::Load { src: "a".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "a".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(1),
         );
         k.body.name_value(ValueId::new(1), "x");
         k.body.push_op(
-            Op::Load { src: "b".into(), indices: vec![IndexExpr::Value(ValueId::new(0))], mask: None, other: None },
+            Op::Load {
+                src: "b".into(),
+                indices: vec![IndexExpr::Value(ValueId::new(0))],
+                mask: None,
+                other: None,
+            },
             ValueId::new(2),
         );
         k.body.name_value(ValueId::new(2), "y");
@@ -2211,12 +2326,18 @@ mod tests {
         let mut k = Kernel::new("row_reduce_sum");
         k.mode = KernelMode::Reduction;
         k.params.push(Param {
-            name: "inp".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: false, kind: ParamKind::Tensor,
+            name: "inp".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: false,
+            kind: ParamKind::Tensor,
         });
         k.params.push(Param {
-            name: "out".into(), dtype: DType::F32, shape: Shape::scalar(),
-            is_output: true, kind: ParamKind::Tensor,
+            name: "out".into(),
+            dtype: DType::F32,
+            shape: Shape::scalar(),
+            is_output: true,
+            kind: ParamKind::Tensor,
         });
         k.constexprs.push(ConstExprDecl {
             name: ConstExpr::new("n"),
@@ -2224,8 +2345,12 @@ mod tests {
             value: None,
         });
         let (row, nv, rs, re, acc, res) = (
-            ValueId::new(0), ValueId::new(1), ValueId::new(2),
-            ValueId::new(3), ValueId::new(4), ValueId::new(5),
+            ValueId::new(0),
+            ValueId::new(1),
+            ValueId::new(2),
+            ValueId::new(3),
+            ValueId::new(4),
+            ValueId::new(5),
         );
         k.body.push_op(Op::ProgramId { axis: 0 }, row);
         k.body.name_value(row, "row");
@@ -2236,9 +2361,15 @@ mod tests {
         k.body.name_value(re, "re");
         k.body.push_op(
             Op::StrideReduce {
-                src: "inp".into(), offset: rs, stride: nv, end: re,
-                op: ReduceKind::Sum, dtype: DType::F32,
-                transform: None, secondary_src: None, secondary_base: None,
+                src: "inp".into(),
+                offset: rs,
+                stride: nv,
+                end: re,
+                op: ReduceKind::Sum,
+                dtype: DType::F32,
+                transform: None,
+                secondary_src: None,
+                secondary_base: None,
             },
             acc,
         );
@@ -2246,7 +2377,10 @@ mod tests {
         k.body.push_op(Op::Reduce { value: acc, axis: 0, op: ReduceKind::Sum }, res);
         k.body.name_value(res, "result");
         k.body.push_op_no_result(Op::Store {
-            dst: "out".into(), indices: vec![IndexExpr::Value(row)], value: res, mask: None,
+            dst: "out".into(),
+            indices: vec![IndexExpr::Value(row)],
+            value: res,
+            mask: None,
         });
         k
     }

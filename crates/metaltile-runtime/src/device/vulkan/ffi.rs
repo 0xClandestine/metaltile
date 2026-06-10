@@ -672,11 +672,7 @@ unsafe extern "C" {
         pAllocator: *const c_void,
         pPipelines: *mut VkPipeline_,
     ) -> VkResult;
-    pub fn vkDestroyPipeline(
-        device: VkDevice,
-        pipeline: VkPipeline_,
-        pAllocator: *const c_void,
-    );
+    pub fn vkDestroyPipeline(device: VkDevice, pipeline: VkPipeline_, pAllocator: *const c_void);
 
     pub fn vkCreateDescriptorPool(
         device: VkDevice,
@@ -927,11 +923,7 @@ unsafe extern "C" {
         pAllocator: *const c_void,
         pPipelines: *mut VkPipeline_,
     ) -> VkResult;
-    pub fn vkDestroyPipeline(
-        device: VkDevice,
-        pipeline: VkPipeline_,
-        pAllocator: *const c_void,
-    );
+    pub fn vkDestroyPipeline(device: VkDevice, pipeline: VkPipeline_, pAllocator: *const c_void);
 
     pub fn vkCreateDescriptorPool(
         device: VkDevice,
@@ -1112,9 +1104,7 @@ unsafe extern "C" {
     ) -> shaderc_compilation_status;
     pub fn shaderc_result_get_length(result: shaderc_compilation_result_t) -> usize;
     pub fn shaderc_result_get_bytes(result: shaderc_compilation_result_t) -> *const u8;
-    pub fn shaderc_result_get_error_message(
-        result: shaderc_compilation_result_t,
-    ) -> *const c_char;
+    pub fn shaderc_result_get_error_message(result: shaderc_compilation_result_t) -> *const c_char;
 }
 
 #[cfg(not(windows))]
@@ -1148,9 +1138,7 @@ unsafe extern "C" {
     ) -> shaderc_compilation_status;
     pub fn shaderc_result_get_length(result: shaderc_compilation_result_t) -> usize;
     pub fn shaderc_result_get_bytes(result: shaderc_compilation_result_t) -> *const u8;
-    pub fn shaderc_result_get_error_message(
-        result: shaderc_compilation_result_t,
-    ) -> *const c_char;
+    pub fn shaderc_result_get_error_message(result: shaderc_compilation_result_t) -> *const c_char;
 }
 
 // Silence unused param warnings on c_uint imports if any.
