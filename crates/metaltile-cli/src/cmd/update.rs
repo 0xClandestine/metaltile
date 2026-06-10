@@ -337,7 +337,8 @@ fn install_binary(src: &PathBuf, dest: &PathBuf) -> Result<(), crate::CliError> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).map_err(crate::CliError::Io)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+            .map_err(crate::CliError::Io)?;
     }
 
     fs::rename(&tmp, dest).map_err(|e| {

@@ -1,5 +1,7 @@
 [files]
-extend-exclude = []
+# Binary image assets — typos' binary detection misses PNGs with long
+# printable runs and flags compressed bytes as words.
+extend-exclude = ["*.png"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true

@@ -227,7 +227,12 @@ pub fn ffai_gemv_q8_coalesced_accum<T>(
 /// in_proj output be split (z / xBC / dt) ON-DEVICE instead of via a host
 /// download, so the layer runs pure-async. `offbuf[0]` is the start offset.
 #[kernel]
-pub fn ffai_slice<T>(src: Tensor<T>, mut dst: Tensor<T>, #[constexpr] off: u32, #[constexpr] len: u32) {
+pub fn ffai_slice<T>(
+    src: Tensor<T>,
+    mut dst: Tensor<T>,
+    #[constexpr] off: u32,
+    #[constexpr] len: u32,
+) {
     let i = program_id::<0>();
     if i < len {
         store(dst[i], load(src[off + i]));
@@ -237,7 +242,12 @@ pub fn ffai_slice<T>(src: Tensor<T>, mut dst: Tensor<T>, #[constexpr] off: u32, 
 /// Device dt for Mamba2: `dt[i] = softplus(dt_raw[i] + dt_bias[i])` (stable form).
 /// Keeps the Mamba dt computation ON-DEVICE (no host round-trip).
 #[kernel]
-pub fn ffai_softplus_add(a: Tensor<f32>, b: Tensor<f32>, mut out: Tensor<f32>, #[constexpr] n: u32) {
+pub fn ffai_softplus_add(
+    a: Tensor<f32>,
+    b: Tensor<f32>,
+    mut out: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
     let i = program_id::<0>();
     if i < n {
         let x = load(a[i]) + load(b[i]);
@@ -253,7 +263,11 @@ pub fn ffai_softplus_add(a: Tensor<f32>, b: Tensor<f32>, mut out: Tensor<f32>, #
 /// 4 elems/thread (block = gs/4), threadgroup reduce.
 #[kernel]
 pub fn ffai_gated_group_rmsnorm<T>(
-    y: Tensor<f32>, z: Tensor<T>, w: Tensor<T>, mut out: Tensor<T>, eps_buf: Tensor<f32>,
+    y: Tensor<f32>,
+    z: Tensor<T>,
+    w: Tensor<T>,
+    mut out: Tensor<T>,
+    eps_buf: Tensor<f32>,
     #[constexpr] gs: u32,
 ) {
     let grp = program_id::<0>();
@@ -293,7 +307,13 @@ pub fn ffai_gated_group_rmsnorm<T>(
 /// Feeds `mt_dsv4_router_topk` (top-k by biased, weights from unbiased) so the whole
 /// router stays ON-DEVICE — no per-MoE-layer dl(gate)+host-topk+up(idx) sync round-trip.
 #[kernel]
-pub fn ffai_moe_sigmoid_bias(logits: Tensor<f32>, bias: Tensor<f32>, mut unbiased: Tensor<f32>, mut biased: Tensor<f32>, #[constexpr] n: u32) {
+pub fn ffai_moe_sigmoid_bias(
+    logits: Tensor<f32>,
+    bias: Tensor<f32>,
+    mut unbiased: Tensor<f32>,
+    mut biased: Tensor<f32>,
+    #[constexpr] n: u32,
+) {
     let i = program_id::<0>();
     if i < n {
         let s = 1.0f32 / (1.0f32 + exp(0.0f32 - load(logits[i])));
@@ -337,8 +357,14 @@ pub fn ffai_cast_f16_f32(src: Tensor<f16>, mut dst: Tensor<f32>, #[constexpr] n:
 /// the GPU. `keep = (kc-2)*conv_dim`; indices clamped so both select branches
 /// are in-bounds.
 #[kernel]
-pub fn ffai_conv_roll<T>(old: Tensor<T>, xbc: Tensor<T>, mut newst: Tensor<T>,
-    #[constexpr] conv_dim: u32, #[constexpr] keep: u32, #[constexpr] n: u32) {
+pub fn ffai_conv_roll<T>(
+    old: Tensor<T>,
+    xbc: Tensor<T>,
+    mut newst: Tensor<T>,
+    #[constexpr] conv_dim: u32,
+    #[constexpr] keep: u32,
+    #[constexpr] n: u32,
+) {
     let i = program_id::<0>();
     if i < n {
         let oi = select(i < keep, i + conv_dim, 0u32);
@@ -355,8 +381,14 @@ pub fn ffai_conv_roll<T>(old: Tensor<T>, xbc: Tensor<T>, mut newst: Tensor<T>,
 /// `[top_k*inter]`. grid = top_k*inter threadgroups.
 #[kernel]
 pub fn ffai_moe_gather_q4_relu2<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f16>, x: Tensor<T>, idx: Tensor<u32>, mut out: Tensor<T>,
-    #[constexpr] k_in: u32, #[constexpr] inter: u32, #[constexpr] rows_per_tg: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f16>,
+    x: Tensor<T>,
+    idx: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] inter: u32,
+    #[constexpr] rows_per_tg: u32,
 ) {
     // 2D grid [inter/rows_per_tg, top_k]: slot = tgid_y; `rows_per_tg` warps per
     // TG each own one inter-row (multi-warp hides global-load latency, same as
@@ -382,7 +414,9 @@ pub fn ffai_moe_gather_q4_relu2<T>(
             let mut blk = 0.0f32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xfu32;
-                blk = blk + (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32)) * load(x[xb + i]).cast::<f32>();
+                blk = blk
+                    + (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32))
+                        * load(x[xb + i]).cast::<f32>();
             }
             dot = dot + dd * blk;
         }
@@ -401,8 +435,15 @@ pub fn ffai_moe_gather_q4_relu2<T>(
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn ffai_moe_gather_q4_down_accum<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f32>, x: Tensor<T>, idx: Tensor<u32>, wts: Tensor<f32>, mut acc: Tensor<T>,
-    #[constexpr] inter: u32, #[constexpr] hid: u32, #[constexpr] top_k: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f32>,
+    x: Tensor<T>,
+    idx: Tensor<u32>,
+    wts: Tensor<f32>,
+    mut acc: Tensor<T>,
+    #[constexpr] inter: u32,
+    #[constexpr] hid: u32,
+    #[constexpr] top_k: u32,
 ) {
     let h = tgid_x;
     let lane = tid;
@@ -425,7 +466,9 @@ pub fn ffai_moe_gather_q4_down_accum<T>(
             let xb = xoff + block * 32u32 + sub * 8u32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xfu32;
-                dot = dot + dd * (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32)) * load(x[xb + i]).cast::<f32>();
+                dot = dot
+                    + dd * (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32))
+                        * load(x[xb + i]).cast::<f32>();
             }
         }
         total = total + w * simd_sum(dot);
@@ -440,8 +483,14 @@ pub fn ffai_moe_gather_q4_down_accum<T>(
 /// fused-accum variant's grid[hid] which serialized top_k experts at ~50% bw).
 #[kernel]
 pub fn ffai_moe_gather_q4_down<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f16>, x: Tensor<T>, idx: Tensor<u32>, mut out: Tensor<T>,
-    #[constexpr] inter: u32, #[constexpr] hid: u32, #[constexpr] rows_per_tg: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f16>,
+    x: Tensor<T>,
+    idx: Tensor<u32>,
+    mut out: Tensor<T>,
+    #[constexpr] inter: u32,
+    #[constexpr] hid: u32,
+    #[constexpr] rows_per_tg: u32,
 ) {
     // 2D grid [hid/rows_per_tg, top_k]: rows_per_tg warps/TG, one hid-row each
     // (multi-warp latency hiding). rows_per_tg=1 is bit-identical.
@@ -467,12 +516,16 @@ pub fn ffai_moe_gather_q4_down<T>(
             let mut blk = 0.0f32;
             for i in range(0u32, 8u32, 1u32) {
                 let nib = (packed >> (i * 4u32)) & 0xfu32;
-                blk = blk + (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32)) * load(x[xb + i]).cast::<f32>();
+                blk = blk
+                    + (nib.cast::<f32>() - select(nib > 7u32, 16.0f32, 0.0f32))
+                        * load(x[xb + i]).cast::<f32>();
             }
             dot = dot + dd * blk;
         }
         let total = simd_sum(dot);
-        if lane == 0u32 { store(out[slot * hid + local], total.cast::<T>()); }
+        if lane == 0u32 {
+            store(out[slot * hid + local], total.cast::<T>());
+        }
     }
 }
 
@@ -480,8 +533,11 @@ pub fn ffai_moe_gather_q4_down<T>(
 /// `acc[h] += Σ_slot wts[slot]·downs[slot*hid + h]`. Cheap (grid hid).
 #[kernel]
 pub fn ffai_moe_weighted_sum<T>(
-    downs: Tensor<T>, wts: Tensor<f32>, mut acc: Tensor<T>,
-    #[constexpr] hid: u32, #[constexpr] top_k: u32,
+    downs: Tensor<T>,
+    wts: Tensor<f32>,
+    mut acc: Tensor<T>,
+    #[constexpr] hid: u32,
+    #[constexpr] top_k: u32,
 ) {
     let h = program_id::<0>();
     if h < hid {
@@ -501,8 +557,13 @@ pub fn ffai_moe_weighted_sum<T>(
 /// Plain Q4 coalesced matvec: `out[r] = Σ_k dequant4(W[r,k]) · x[...]`.
 #[kernel]
 pub fn ffai_gemv_q4_coalesced<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f16>, x: Tensor<T>, mut out: Tensor<T>,
-    #[constexpr] k_in: u32, #[constexpr] m_out: u32, #[constexpr] rows_per_group: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] rows_per_group: u32,
     #[constexpr] rows_per_tg: u32,
 ) {
     // Multi-warp: `rows_per_tg` warps per threadgroup, each warp owns one row.
@@ -535,7 +596,9 @@ pub fn ffai_gemv_q4_coalesced<T>(
             dot = dot + d * blk;
         }
         let total = simd_sum(dot);
-        if lane == 0u32 { store(out[row], total.cast::<T>()); }
+        if lane == 0u32 {
+            store(out[row], total.cast::<T>());
+        }
     }
 }
 
@@ -547,8 +610,13 @@ pub fn ffai_gemv_q4_coalesced<T>(
 /// lanes read adjacent 16-byte blocks.
 #[kernel]
 pub fn ffai_gemv_q4_vec<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f32>, x: Tensor<T>, mut out: Tensor<T>,
-    #[constexpr] k_in: u32, #[constexpr] m_out: u32, #[constexpr] rows_per_group: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f32>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] rows_per_group: u32,
 ) {
     let row = tgid_x;
     let lane = tid;
@@ -574,24 +642,34 @@ pub fn ffai_gemv_q4_vec<T>(
         let mut acc = 0.0f32;
         for i in range(0u32, 8u32, 1u32) {
             let n0 = (p0 >> (i * 4u32)) & 0xfu32;
-            acc = acc + (n0.cast::<f32>() - select(n0 > 7u32, 16.0f32, 0.0f32)) * load(x[xb + i]).cast::<f32>();
+            acc = acc
+                + (n0.cast::<f32>() - select(n0 > 7u32, 16.0f32, 0.0f32))
+                    * load(x[xb + i]).cast::<f32>();
         }
         for i in range(0u32, 8u32, 1u32) {
             let n1 = (p1 >> (i * 4u32)) & 0xfu32;
-            acc = acc + (n1.cast::<f32>() - select(n1 > 7u32, 16.0f32, 0.0f32)) * load(x[xb + 8u32 + i]).cast::<f32>();
+            acc = acc
+                + (n1.cast::<f32>() - select(n1 > 7u32, 16.0f32, 0.0f32))
+                    * load(x[xb + 8u32 + i]).cast::<f32>();
         }
         for i in range(0u32, 8u32, 1u32) {
             let n2 = (p2 >> (i * 4u32)) & 0xfu32;
-            acc = acc + (n2.cast::<f32>() - select(n2 > 7u32, 16.0f32, 0.0f32)) * load(x[xb + 16u32 + i]).cast::<f32>();
+            acc = acc
+                + (n2.cast::<f32>() - select(n2 > 7u32, 16.0f32, 0.0f32))
+                    * load(x[xb + 16u32 + i]).cast::<f32>();
         }
         for i in range(0u32, 8u32, 1u32) {
             let n3 = (p3 >> (i * 4u32)) & 0xfu32;
-            acc = acc + (n3.cast::<f32>() - select(n3 > 7u32, 16.0f32, 0.0f32)) * load(x[xb + 24u32 + i]).cast::<f32>();
+            acc = acc
+                + (n3.cast::<f32>() - select(n3 > 7u32, 16.0f32, 0.0f32))
+                    * load(x[xb + 24u32 + i]).cast::<f32>();
         }
         dot = dot + d * acc;
     }
     let total = simd_sum(dot);
-    if lane == 0u32 { store(out[row], total.cast::<T>()); }
+    if lane == 0u32 {
+        store(out[row], total.cast::<T>());
+    }
 }
 
 /// Q4 GEMV, 2 output rows per warp: load the shared activation `x` ONCE and run
@@ -606,8 +684,13 @@ pub fn ffai_gemv_q4_vec<T>(
 /// `row_b` clamps its weight reads to `row_a` and skips its store.
 #[kernel]
 pub fn ffai_gemv_q4_coalesced_2row<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f32>, x: Tensor<T>, mut out: Tensor<T>,
-    #[constexpr] k_in: u32, #[constexpr] m_out: u32, #[constexpr] rows_per_group: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f32>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] rows_per_group: u32,
     #[constexpr] rows_per_tg: u32,
 ) {
     let warp = tid / 32u32;
@@ -637,23 +720,25 @@ pub fn ffai_gemv_q4_coalesced_2row<T>(
             let dda = load(d_f32[da + block]);
             let ddb = load(d_f32[db + block]);
             let xb = x_base + block * 32u32 + sub * 8u32;
-            let mut ba = 0.0f32;
+            let mut acc_a = 0.0f32;
             let mut bb = 0.0f32;
             for i in range(0u32, 8u32, 1u32) {
                 let xv = load(x[xb + i]).cast::<f32>();
                 let na = (pa >> (i * 4u32)) & 0xfu32;
                 let nb = (pb >> (i * 4u32)) & 0xfu32;
-                ba = ba + (na.cast::<f32>() - select(na > 7u32, 16.0f32, 0.0f32)) * xv;
+                acc_a = acc_a + (na.cast::<f32>() - select(na > 7u32, 16.0f32, 0.0f32)) * xv;
                 bb = bb + (nb.cast::<f32>() - select(nb > 7u32, 16.0f32, 0.0f32)) * xv;
             }
-            dot_a = dot_a + dda * ba;
+            dot_a = dot_a + dda * acc_a;
             dot_b = dot_b + ddb * bb;
         }
         let ta = simd_sum(dot_a);
         let tb = simd_sum(dot_b);
         if lane == 0u32 {
             store(out[row_a], ta.cast::<T>());
-            if row_b < m_out { store(out[row_b], tb.cast::<T>()); }
+            if row_b < m_out {
+                store(out[row_b], tb.cast::<T>());
+            }
         }
     }
 }
@@ -666,8 +751,13 @@ pub fn ffai_gemv_q4_coalesced_2row<T>(
 /// bit-identical to the original (warp=0, lane=tid, row=tgid_x).
 #[kernel]
 pub fn ffai_gemv_q4_coalesced_relu2<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f16>, x: Tensor<T>, mut out: Tensor<T>,
-    #[constexpr] k_in: u32, #[constexpr] m_out: u32, #[constexpr] rows_per_group: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f16>,
+    x: Tensor<T>,
+    mut out: Tensor<T>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] rows_per_group: u32,
     #[constexpr] rows_per_tg: u32,
 ) {
     let warp = tid / 32u32;
@@ -711,8 +801,14 @@ pub fn ffai_gemv_q4_coalesced_relu2<T>(
 #[kernel]
 #[allow(clippy::too_many_arguments)]
 pub fn ffai_gemv_q4_coalesced_accum<T>(
-    qs: Tensor<u32>, d_f32: Tensor<f16>, x: Tensor<T>, mut acc: Tensor<T>, scale: Tensor<f32>,
-    #[constexpr] k_in: u32, #[constexpr] m_out: u32, #[constexpr] rows_per_group: u32,
+    qs: Tensor<u32>,
+    d_f32: Tensor<f16>,
+    x: Tensor<T>,
+    mut acc: Tensor<T>,
+    scale: Tensor<f32>,
+    #[constexpr] k_in: u32,
+    #[constexpr] m_out: u32,
+    #[constexpr] rows_per_group: u32,
     #[constexpr] rows_per_tg: u32,
 ) {
     let warp = tid / 32u32;

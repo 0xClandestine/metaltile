@@ -148,7 +148,8 @@ pub mod kernel_tests {
         let (qs, scales) = quantize_q4(&values, m, k);
         // Scales are stored f16 (matches the resident loader). Round the oracle
         // through f16 so expected == GPU.
-        let scales_f16: Vec<f32> = scales.iter().map(|&s| half::f16::from_f32(s).to_f32()).collect();
+        let scales_f16: Vec<f32> =
+            scales.iter().map(|&s| half::f16::from_f32(s).to_f32()).collect();
         let dequantized = cpu_dequant(&qs, &scales_f16, m, k);
         let qs_bytes: Vec<u8> = qs.iter().flat_map(|x| x.to_le_bytes()).collect();
         TestSetup::new(ffai_dequant_q4::kernel_ir_for(dt))

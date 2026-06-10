@@ -178,7 +178,14 @@ pub mod kernel_tests {
     }
 
     // out[r,o] = Σ_k dequant(W[o,k]) · x[r,k]; scales rounded through f16.
-    fn naive(x: &[f32], qs: &[u32], scales_f16: &[f32], n_rows: usize, out_dim: usize, k_in: usize) -> Vec<f32> {
+    fn naive(
+        x: &[f32],
+        qs: &[u32],
+        scales_f16: &[f32],
+        n_rows: usize,
+        out_dim: usize,
+        k_in: usize,
+    ) -> Vec<f32> {
         let bpr = k_in / 32;
         let mut out = vec![0f32; n_rows * out_dim];
         for r in 0..n_rows {
@@ -199,10 +206,13 @@ pub mod kernel_tests {
     }
 
     fn setup(n_rows: usize, out_dim: usize, k_in: usize, dt: DType) -> TestSetup {
-        let xv: Vec<f32> = (0..n_rows * k_in).map(|i| (i as f32 * 0.011 - 0.5).sin() * 1.3).collect();
-        let wv: Vec<f32> = (0..out_dim * k_in).map(|i| (i as f32 * 0.017 - 0.3).cos() * 0.9).collect();
+        let xv: Vec<f32> =
+            (0..n_rows * k_in).map(|i| (i as f32 * 0.011 - 0.5).sin() * 1.3).collect();
+        let wv: Vec<f32> =
+            (0..out_dim * k_in).map(|i| (i as f32 * 0.017 - 0.3).cos() * 0.9).collect();
         let (qs, scales) = quantize_q4(&wv, out_dim, k_in);
-        let scales_f16: Vec<f32> = scales.iter().map(|&s| half::f16::from_f32(s).to_f32()).collect();
+        let scales_f16: Vec<f32> =
+            scales.iter().map(|&s| half::f16::from_f32(s).to_f32()).collect();
         let expected = naive(&xv, &qs, &scales_f16, n_rows, out_dim, k_in);
         let qs_bytes: Vec<u8> = qs.iter().flat_map(|x| x.to_le_bytes()).collect();
         TestSetup::new(ffai_gemm_q4_mpp::kernel_ir_for(dt))

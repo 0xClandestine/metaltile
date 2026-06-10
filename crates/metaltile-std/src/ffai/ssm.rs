@@ -99,10 +99,10 @@ pub fn conv1d_causal_step<T>(
 // Gate: NEMOTRON_CONV_DEVICE=1 in bench_nemotron.
 #[kernel]
 pub fn conv1d_causal_prefill(
-    xbc_in: Tensor<f32>,     // [s * conv_dim] flat row-major
-    w: Tensor<f32>,          // [kc * conv_dim] reorganized same as decode step
-    bias: Tensor<f32>,       // [conv_dim]
-    mut y: Tensor<f32>,      // [s * conv_dim] output with silu applied
+    xbc_in: Tensor<f32>, // [s * conv_dim] flat row-major
+    w: Tensor<f32>,      // [kc * conv_dim] reorganized same as decode step
+    bias: Tensor<f32>,   // [conv_dim]
+    mut y: Tensor<f32>,  // [s * conv_dim] output with silu applied
     #[constexpr] conv_dim: u32,
     #[constexpr] kc: u32,
 ) {
@@ -139,7 +139,7 @@ pub fn conv1d_causal_prefill(
 // Grid: [s * width, 1, 1]; one thread per output element.
 #[kernel]
 pub fn strided_col_copy(
-    src: Tensor<f32>,    // [s * stride] flat row-major
+    src: Tensor<f32>,     // [s * stride] flat row-major
     mut dst: Tensor<f32>, // [s * width] output
     #[constexpr] stride: u32,
     #[constexpr] col_off: u32,
@@ -690,7 +690,8 @@ pub mod kernel_tests {
     fn conv1d_causal_prefill_setup(s: usize, conv_dim: usize, kc: usize) -> TestSetup {
         let dt = DType::F32;
         let xbc: Vec<f32> = (0..s * conv_dim).map(|i| ((i as f32) * 0.011).sin() * 0.5).collect();
-        let w: Vec<f32> = (0..kc * conv_dim).map(|i| 0.1 + ((i as f32) * 0.019).cos() * 0.2).collect();
+        let w: Vec<f32> =
+            (0..kc * conv_dim).map(|i| 0.1 + ((i as f32) * 0.019).cos() * 0.2).collect();
         let bias: Vec<f32> = (0..conv_dim).map(|i| (i as f32) * 0.001 - 0.05).collect();
         let y_exp = conv1d_causal_prefill_oracle(&xbc, &w, &bias, s, conv_dim, kc);
         use super::conv1d_causal_prefill;
@@ -711,7 +712,13 @@ pub mod kernel_tests {
 
     // ── strided_col_copy ──────────────────────────────────────────────────
 
-    fn strided_col_copy_oracle(src: &[f32], s: usize, stride: usize, col_off: usize, width: usize) -> Vec<f32> {
+    fn strided_col_copy_oracle(
+        src: &[f32],
+        s: usize,
+        stride: usize,
+        col_off: usize,
+        width: usize,
+    ) -> Vec<f32> {
         (0..s).flat_map(|ti| (0..width).map(move |ci| src[ti * stride + col_off + ci])).collect()
     }
 
@@ -738,10 +745,14 @@ pub mod kernel_tests {
 
     fn softplus_add_rows_oracle(src: &[f32], bias: &[f32], n: usize) -> Vec<f32> {
         let s = src.len() / n;
-        (0..s).flat_map(|ti| (0..n).map(move |hi| {
-            let raw = src[ti * n + hi] + bias[hi];
-            if raw > 20.0 { raw } else { (1.0f32 + raw.exp()).ln() }
-        })).collect()
+        (0..s)
+            .flat_map(|ti| {
+                (0..n).map(move |hi| {
+                    let raw = src[ti * n + hi] + bias[hi];
+                    if raw > 20.0 { raw } else { (1.0f32 + raw.exp()).ln() }
+                })
+            })
+            .collect()
     }
 
     fn softplus_add_rows_setup(s: usize, n: usize) -> TestSetup {
@@ -873,10 +884,10 @@ pub mod kernel_benches {
 // Each thread identifies which output slice it belongs to and writes there.
 #[kernel]
 pub fn mamba_split_proj(
-    proj: Tensor<f32>,       // [s * in_proj_out] flat row-major
-    mut z_out: Tensor<f32>,  // [s * di]
+    proj: Tensor<f32>,        // [s * in_proj_out] flat row-major
+    mut z_out: Tensor<f32>,   // [s * di]
     mut xbc_out: Tensor<f32>, // [s * conv_dim]
-    mut dt_out: Tensor<f32>, // [s * m_nh]
+    mut dt_out: Tensor<f32>,  // [s * m_nh]
     #[constexpr] in_proj_out: u32,
     #[constexpr] di: u32,
     #[constexpr] conv_dim: u32,
@@ -908,13 +919,13 @@ pub fn mamba_split_proj(
 // Grid: [s * conv_dim, 1, 1]; one thread per source element.
 #[kernel]
 pub fn mamba_split_conv(
-    yc: Tensor<f32>,          // [s * conv_dim] flat row-major
-    mut x_out: Tensor<f32>,   // [s * di]
-    mut b_out: Tensor<f32>,   // [s * ng_ds]
-    mut c_out: Tensor<f32>,   // [s * ng_ds]
+    yc: Tensor<f32>,        // [s * conv_dim] flat row-major
+    mut x_out: Tensor<f32>, // [s * di]
+    mut b_out: Tensor<f32>, // [s * ng_ds]
+    mut c_out: Tensor<f32>, // [s * ng_ds]
     #[constexpr] conv_dim: u32,
     #[constexpr] di: u32,
-    #[constexpr] ng_ds: u32,  // ng * ds
+    #[constexpr] ng_ds: u32, // ng * ds
 ) {
     let idx = program_id::<0>();
     let ti = idx / conv_dim;
@@ -945,19 +956,19 @@ pub fn mamba_split_conv(
 //   Each thread in the block handles 4 consecutive elements.
 #[kernel]
 pub fn gated_group_rmsnorm_batched(
-    y: Tensor<f32>,      // [s * di] flat
-    z: Tensor<f32>,      // [s * di] flat
-    w: Tensor<f32>,      // [di]     norm weights (shared across tokens)
+    y: Tensor<f32>,       // [s * di] flat
+    z: Tensor<f32>,       // [s * di] flat
+    w: Tensor<f32>,       // [di]     norm weights (shared across tokens)
     mut out: Tensor<f32>, // [s * di]
     eps_buf: Tensor<f32>, // [1]
-    #[constexpr] gs: u32,  // group size (512 for Nemotron)
-    #[constexpr] ng: u32,  // number of groups per token (8 for Nemotron)
+    #[constexpr] gs: u32, // group size (512 for Nemotron)
+    #[constexpr] ng: u32, // number of groups per token (8 for Nemotron)
 ) {
     // program_id::<0>() = token * ng + group
     let tg = program_id::<0>();
     let grp = tg - (tg / ng) * ng;
-    let ti  = tg / ng;
-    let rs  = ti * ng * gs + grp * gs;  // start offset in [s * di]
+    let ti = tg / ng;
+    let rs = ti * ng * gs + grp * gs; // start offset in [s * di]
     let col = tid * 4u32;
     let in_bounds = col + 3u32 < gs;
     let safe_col = select(in_bounds, col, 0u32);
@@ -981,10 +992,10 @@ pub fn gated_group_rmsnorm_batched(
     let rms = rsqrt(ssq / (gs.cast::<f32>()) + eps);
     if in_bounds {
         let base = rs + col;
-        store(out[base],          (g0 * rms * load(w[grp * gs + col])));
-        store(out[base + 1u32],   (g1 * rms * load(w[grp * gs + col + 1u32])));
-        store(out[base + 2u32],   (g2 * rms * load(w[grp * gs + col + 2u32])));
-        store(out[base + 3u32],   (g3 * rms * load(w[grp * gs + col + 3u32])));
+        store(out[base], (g0 * rms * load(w[grp * gs + col])));
+        store(out[base + 1u32], (g1 * rms * load(w[grp * gs + col + 1u32])));
+        store(out[base + 2u32], (g2 * rms * load(w[grp * gs + col + 2u32])));
+        store(out[base + 3u32], (g3 * rms * load(w[grp * gs + col + 3u32])));
     }
 }
 
@@ -1006,15 +1017,15 @@ pub fn gated_group_rmsnorm_batched(
 // dt layout [T, H]; lcs layout [nc*H, L]. Grid: [nc*H, 1, 1].
 #[kernel]
 pub fn ssd_lcs(
-    dt: Tensor<f32>,       // [T, H]
-    a_log: Tensor<f32>,    // [H]
-    mut lcs: Tensor<f32>,  // [nc*H, L]
+    dt: Tensor<f32>,      // [T, H]
+    a_log: Tensor<f32>,   // [H]
+    mut lcs: Tensor<f32>, // [nc*H, L]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] l: u32,
     #[constexpr] nc: u32,
 ) {
-    let idx = program_id::<0>();      // bh = c*H + h
+    let idx = program_id::<0>(); // bh = c*H + h
     let total = nc * n_heads;
     if idx < total {
         let c = idx / n_heads;
@@ -1038,8 +1049,8 @@ pub fn ssd_lcs(
 // h/hpg). One thread per output element. Grid: [nc*H*L*ds, 1, 1].
 #[kernel]
 pub fn ssd_gather_bc(
-    b_mat: Tensor<f32>,    // [T, G, ds]
-    c_mat: Tensor<f32>,    // [T, G, ds]
+    b_mat: Tensor<f32>,     // [T, G, ds]
+    c_mat: Tensor<f32>,     // [T, G, ds]
     mut b_out: Tensor<f32>, // [nc*H, L, ds]
     mut c_out: Tensor<f32>, // [nc*H, L, ds]
     #[constexpr] t_total: u32,
@@ -1074,8 +1085,8 @@ pub fn ssd_gather_bc(
 // Grid: [nc*H*dh*L, 1, 1].
 #[kernel]
 pub fn ssd_xt(
-    x: Tensor<f32>,        // [T, H, dh]
-    mut xt: Tensor<f32>,   // [nc*H, dh, L]
+    x: Tensor<f32>,      // [T, H, dh]
+    mut xt: Tensor<f32>, // [nc*H, dh, L]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] dh: u32,
@@ -1085,7 +1096,7 @@ pub fn ssd_xt(
     let e = program_id::<0>();
     let n = nc * n_heads * dh * l;
     if e < n {
-        let i = e - (e / l) * l;              // position within chunk
+        let i = e - (e / l) * l; // position within chunk
         let p = (e / l) - (e / (l * dh)) * dh; // head_dim index
         let bh = e / (l * dh);
         let c = bh / n_heads;
@@ -1103,9 +1114,9 @@ pub fn ssd_xt(
 // Grid: [nc*H*L*L, 1, 1].
 #[kernel]
 pub fn ssd_mmask(
-    cb: Tensor<f32>,       // [nc*H, L, L] = C·Bᵀ
-    lcs: Tensor<f32>,      // [nc*H, L]
-    dt: Tensor<f32>,       // [T, H]
+    cb: Tensor<f32>,        // [nc*H, L, L] = C·Bᵀ
+    lcs: Tensor<f32>,       // [nc*H, L]
+    dt: Tensor<f32>,        // [T, H]
     mut m_out: Tensor<f32>, // [nc*H, L, L]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
@@ -1141,10 +1152,10 @@ pub fn ssd_mmask(
 // Grid: [nc*H*ds*L, 1, 1].
 #[kernel]
 pub fn ssd_bdt(
-    b_mat: Tensor<f32>,    // [T, G, ds]
-    lcs: Tensor<f32>,      // [nc*H, L]
-    dt: Tensor<f32>,       // [T, H]
-    mut bdt: Tensor<f32>,  // [nc*H, ds, L]
+    b_mat: Tensor<f32>,   // [T, G, ds]
+    lcs: Tensor<f32>,     // [nc*H, L]
+    dt: Tensor<f32>,      // [T, H]
+    mut bdt: Tensor<f32>, // [nc*H, ds, L]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] n_groups: u32,
@@ -1156,7 +1167,7 @@ pub fn ssd_bdt(
     let e = program_id::<0>();
     let n = nc * n_heads * ds * l;
     if e < n {
-        let j = e - (e / l) * l;             // position
+        let j = e - (e / l) * l; // position
         let s = (e / l) - (e / (l * ds)) * ds; // state index
         let bh = e / (l * ds);
         let c = bh / n_heads;
@@ -1180,10 +1191,10 @@ pub fn ssd_bdt(
 // Grid: [H*ds*dh, 1, 1]; one thread per (head, s, p), loops nc serially.
 #[kernel]
 pub fn ssd_recur(
-    s_chunk: Tensor<f32>,   // [nc*H, ds, dh]
-    lcs: Tensor<f32>,       // [nc*H, L]
-    state_in: Tensor<f32>,  // [H, dh, ds]
-    mut sin_t: Tensor<f32>, // [nc*H, dh, ds]  (S_inᵀ per chunk)
+    s_chunk: Tensor<f32>,       // [nc*H, ds, dh]
+    lcs: Tensor<f32>,           // [nc*H, L]
+    state_in: Tensor<f32>,      // [H, dh, ds]
+    mut sin_t: Tensor<f32>,     // [nc*H, dh, ds]  (S_inᵀ per chunk)
     mut state_out: Tensor<f32>, // [H, dh, ds]
     #[constexpr] n_heads: u32,
     #[constexpr] dh: u32,
@@ -1197,7 +1208,7 @@ pub fn ssd_recur(
         // `sidx`/`stv` (not `s`/`st`): a local whose name prefixes a tensor
         // param (`s_chunk`, `sin_t`, `state_*`) trips the DSL codegen
         // local-elision bug → undeclared identifier at dispatch.
-        let p = idx - (idx / dh) * dh;       // head_dim
+        let p = idx - (idx / dh) * dh; // head_dim
         let sidx = (idx / dh) - (idx / (dh * ds)) * ds; // state
         let h = idx / (dh * ds);
         let mut stv = load(state_in[(h * dh + p) * ds + sidx]);
@@ -1219,12 +1230,12 @@ pub fn ssd_recur(
 // Grid: [nc*H*L*dh, 1, 1].
 #[kernel]
 pub fn ssd_combine(
-    y_intra: Tensor<f32>,  // [nc*H, L, dh]
-    cs: Tensor<f32>,       // [nc*H, L, dh]
-    lcs: Tensor<f32>,      // [nc*H, L]
-    x: Tensor<f32>,        // [T, H, dh]
-    d_skip: Tensor<f32>,   // [H]
-    mut y: Tensor<f32>,    // [T, H, dh]
+    y_intra: Tensor<f32>, // [nc*H, L, dh]
+    cs: Tensor<f32>,      // [nc*H, L, dh]
+    lcs: Tensor<f32>,     // [nc*H, L]
+    x: Tensor<f32>,       // [T, H, dh]
+    d_skip: Tensor<f32>,  // [H]
+    mut y: Tensor<f32>,   // [T, H, dh]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] dh: u32,
@@ -1277,11 +1288,11 @@ pub fn ssd_combine(
 // (b_g, c_g) but without ever materializing them or CB.
 #[kernel]
 pub fn ssd_g1_cb(
-    b_mat: Tensor<f32>,    // [T, G, ds]   (weight role)
-    c_mat: Tensor<f32>,    // [T, G, ds]   (input role)
-    lcs: Tensor<f32>,      // [nc*H, L]
-    dt: Tensor<f32>,       // [T, H]
-    mut out: Tensor<f32>,  // [nc*H, L, L]  (M = CB ⊙ decay-mask)
+    b_mat: Tensor<f32>,   // [T, G, ds]   (weight role)
+    c_mat: Tensor<f32>,   // [T, G, ds]   (input role)
+    lcs: Tensor<f32>,     // [nc*H, L]
+    dt: Tensor<f32>,      // [T, H]
+    mut out: Tensor<f32>, // [nc*H, L, L]  (M = CB ⊙ decay-mask)
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] n_groups: u32,
@@ -1289,7 +1300,7 @@ pub fn ssd_g1_cb(
     #[constexpr] l: u32,
     #[constexpr] ds: u32,
 ) {
-    let bz = program_id::<2>();          // batch = c*H + h
+    let bz = program_id::<2>(); // batch = c*H + h
     let c = bz / n_heads;
     let h = bz - c * n_heads;
     let g = h / hpg;
@@ -1353,9 +1364,9 @@ pub fn ssd_g1_cb(
 //   k = ds. sin_t is already per-batch [nc*H, dh, ds]; only C is broadcast.
 #[kernel]
 pub fn ssd_g4_cs(
-    sin_t: Tensor<f32>,    // [nc*H, dh, ds]   (weight role, per-batch)
-    c_mat: Tensor<f32>,    // [T, G, ds]       (input role, broadcast)
-    mut out: Tensor<f32>,  // [nc*H, L, dh]
+    sin_t: Tensor<f32>,   // [nc*H, dh, ds]   (weight role, per-batch)
+    c_mat: Tensor<f32>,   // [T, G, ds]       (input role, broadcast)
+    mut out: Tensor<f32>, // [nc*H, L, dh]
     #[constexpr] t_total: u32,
     #[constexpr] n_heads: u32,
     #[constexpr] n_groups: u32,
@@ -1364,11 +1375,11 @@ pub fn ssd_g4_cs(
     #[constexpr] ds: u32,
     #[constexpr] dh: u32,
 ) {
-    let bz = program_id::<2>();          // batch = c*H + h
+    let bz = program_id::<2>(); // batch = c*H + h
     let c = bz / n_heads;
     let h = bz - c * n_heads;
     let g = h / hpg;
-    let w_base = bz * dh * ds;           // sin_t[bz] base
+    let w_base = bz * dh * ds; // sin_t[bz] base
     let tid = simd_id * 32u32 + simd_lane;
     let lr = tid / 32u32; // output row within tile (i, 0..31)
     let lo = tid % 32u32; // output col within tile (p, 0..31)

@@ -326,8 +326,8 @@ pub fn sdpa_decode_2pass_pass1_bc4<T>(
 
         // ── Grouped online softmax: one rescale for the 4-position group ───
         // Find the maximum across the 4 new scores and the running max.
-        let g01  = select(score0 > score1, score0, score1);
-        let g23  = select(score2 > score3, score2, score3);
+        let g01 = select(score0 > score1, score0, score1);
+        let g23 = select(score2 > score3, score2, score3);
         let gmax = select(g01 > g23, g01, g23);
         let new_max = select(gmax > run_max, gmax, run_max);
         // Rescale old accumulators once by exp(run_max - new_max).

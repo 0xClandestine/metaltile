@@ -119,7 +119,7 @@ pub fn ffai_gemm_batched<T>(
     #[constexpr] x_stride: u32,
     #[constexpr] o_stride: u32,
 ) {
-    let bz = program_id::<2>();          // batch index (rides tgid_z)
+    let bz = program_id::<2>(); // batch index (rides tgid_z)
     let w_base = bz * w_stride;
     let x_base = bz * x_stride;
     let o_base = bz * o_stride;
@@ -269,7 +269,9 @@ pub mod kernel_tests {
             .constexpr("x_stride", (n_rows * in_dim) as u32)
             .constexpr("o_stride", (n_rows * out_dim) as u32)
             .expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt))
-            .grid_3d(out_dim.div_ceil(32) as u32, n_rows.div_ceil(32) as u32, batch as u32, [1024, 1, 1])
+            .grid_3d(out_dim.div_ceil(32) as u32, n_rows.div_ceil(32) as u32, batch as u32, [
+                1024, 1, 1,
+            ])
     }
 
     // Batched, aligned dims. batch>1 exercises the tgid_z + stride math.

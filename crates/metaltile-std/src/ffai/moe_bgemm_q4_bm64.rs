@@ -186,7 +186,15 @@ pub mod kernel_tests {
         (qs, scales)
     }
 
-    fn naive(x: &[f32], qs: &[u32], sc16: &[f32], idx: &[u32], m_total: usize, n_out: usize, k_in: usize) -> Vec<f32> {
+    fn naive(
+        x: &[f32],
+        qs: &[u32],
+        sc16: &[f32],
+        idx: &[u32],
+        m_total: usize,
+        n_out: usize,
+        k_in: usize,
+    ) -> Vec<f32> {
         let bpr = k_in / 32;
         let nblk_per_expert = n_out * bpr;
         let mut out = vec![0f32; m_total * n_out];
@@ -211,8 +219,10 @@ pub mod kernel_tests {
     fn setup(dt: DType) -> TestSetup {
         let (n_exp, m_total, n_out, k_in) = (4usize, 64usize, 64usize, 64usize);
         let bpr = k_in / 32;
-        let xv: Vec<f32> = (0..m_total * k_in).map(|i| (i as f32 * 0.013 - 0.4).sin() * 1.1).collect();
-        let wv: Vec<f32> = (0..n_exp * n_out * k_in).map(|i| (i as f32 * 0.019 - 0.2).cos() * 0.8).collect();
+        let xv: Vec<f32> =
+            (0..m_total * k_in).map(|i| (i as f32 * 0.013 - 0.4).sin() * 1.1).collect();
+        let wv: Vec<f32> =
+            (0..n_exp * n_out * k_in).map(|i| (i as f32 * 0.019 - 0.2).cos() * 0.8).collect();
         let (qs, scales) = quantize_q4(&wv, n_exp * n_out, k_in);
         let sc16: Vec<f32> = scales.iter().map(|&s| half::f16::from_f32(s).to_f32()).collect();
         // Sorted-by-expert indices: 16 rows each of expert 0,1,2,3.
