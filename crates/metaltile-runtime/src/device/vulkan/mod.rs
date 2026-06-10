@@ -166,6 +166,16 @@ pub struct VulkanDevice {
     descriptor_pool: VkDescriptorPool,
     command_pool: VkCommandPool,
     memory_properties: VkPhysicalDeviceMemoryProperties,
+    /// True when the Vulkan-1.3 feature chain (incl. `subgroupSizeControl`)
+    /// was accepted at device creation. The plain fallback device never
+    /// enabled the feature, so chaining `requiredSubgroupSize` there is a
+    /// spec violation.
+    subgroup_size_control: bool,
+    /// VkQueue, the command pool, and the descriptor pool are externally
+    /// synchronized objects — concurrent `run_*`/staging calls through
+    /// `&self` must serialize on this or the driver data-races (this is
+    /// what makes the `unsafe impl Sync` below sound).
+    exec_lock: parking_lot::Mutex<()>,
 }
 
 unsafe impl Send for VulkanDevice {}
@@ -310,7 +320,7 @@ impl VulkanDevice {
             let mut coop_feat: VkPhysicalDeviceCooperativeMatrixFeaturesKHR =
                 std::mem::zeroed();
             let coop_ext_ptr =
-                VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME.as_ptr() as *const i8;
+                VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME.as_ptr() as *const c_char;
             if coopmat {
                 coop_feat.sType =
                     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
@@ -336,18 +346,45 @@ impl VulkanDevice {
             };
             let mut device: VkDevice = ptr::null_mut();
             let create_res = vkCreateDevice(physical_device, &dev_ci, ptr::null(), &mut device);
+            let mut subgroup_size_control = create_res == VK_SUCCESS;
             if create_res != VK_SUCCESS {
-                // Retry without the f16/bf16/i8 chain — old drivers, or
-                // devices that don't support these features, get the
-                // Phase-1 f32-only path back.
-                let plain_ci = VkDeviceCreateInfo {
-                    pNext: ptr::null(),
+                // Stage-2 retry: drop the f16/bf16/i8 feature structs and
+                // the coopmat extension, but KEEP the 1.3 chain with
+                // subgroupSizeControl — losing the subgroup-size pin turns
+                // every subgroupAdd into a wave64 reduction on AMD compute
+                // queues, which numerically breaks the whole corpus. The
+                // Windows AMD driver rejects the full chain (some 1.1/1.2
+                // bit) but accepts this minimal one.
+                let mut feat13_min: VkPhysicalDeviceVulkan13Features = std::mem::zeroed();
+                feat13_min.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+                feat13_min.subgroupSizeControl = VK_TRUE;
+                feat13_min.computeFullSubgroups = VK_TRUE;
+                let sgc_ci = VkDeviceCreateInfo {
+                    pNext: &feat13_min as *const _ as *const c_void,
+                    enabledExtensionCount: 0,
+                    ppEnabledExtensionNames: ptr::null(),
                     ..dev_ci
                 };
-                vk_check(
-                    vkCreateDevice(physical_device, &plain_ci, ptr::null(), &mut device),
-                    "vkCreateDevice(plain)",
-                )?;
+                if vkCreateDevice(physical_device, &sgc_ci, ptr::null(), &mut device)
+                    == VK_SUCCESS
+                {
+                    subgroup_size_control = true;
+                } else {
+                    // Stage-3: plain f32-only device, no feature chain at
+                    // all (very old drivers). Subgroup-size pin unavailable
+                    // — subgroup-cooperative kernels may misbehave on
+                    // wave64-default hardware.
+                    let plain_ci = VkDeviceCreateInfo {
+                        pNext: ptr::null(),
+                        enabledExtensionCount: 0,
+                        ppEnabledExtensionNames: ptr::null(),
+                        ..dev_ci
+                    };
+                    vk_check(
+                        vkCreateDevice(physical_device, &plain_ci, ptr::null(), &mut device),
+                        "vkCreateDevice(plain)",
+                    )?;
+                }
             }
             let mut queue: VkQueue = ptr::null_mut();
             vkGetDeviceQueue(device, queue_family_index, 0, &mut queue);
@@ -403,6 +440,8 @@ impl VulkanDevice {
                 descriptor_pool,
                 command_pool,
                 memory_properties: mem_props,
+                subgroup_size_control,
+                exec_lock: parking_lot::Mutex::new(()),
             }))
         }
     }
@@ -568,7 +607,7 @@ impl VulkanDevice {
                 pBindings: bindings.as_ptr(),
             };
             let mut set_layout: VkDescriptorSetLayout = VK_NULL_HANDLE;
-            vk_check(
+            if let Err(e) = vk_check(
                 vkCreateDescriptorSetLayout(
                     self.device,
                     &dsl_ci,
@@ -576,7 +615,10 @@ impl VulkanDevice {
                     &mut set_layout,
                 ),
                 "vkCreateDescriptorSetLayout",
-            )?;
+            ) {
+                vkDestroyShaderModule(self.device, shader_module, ptr::null());
+                return Err(e);
+            }
 
             // Pipeline layout.
             let pc_range = VkPushConstantRange {
@@ -594,10 +636,14 @@ impl VulkanDevice {
                 pPushConstantRanges: &pc_range,
             };
             let mut layout: VkPipelineLayout = VK_NULL_HANDLE;
-            vk_check(
+            if let Err(e) = vk_check(
                 vkCreatePipelineLayout(self.device, &pl_ci, ptr::null(), &mut layout),
                 "vkCreatePipelineLayout",
-            )?;
+            ) {
+                vkDestroyDescriptorSetLayout(self.device, set_layout, ptr::null());
+                vkDestroyShaderModule(self.device, shader_module, ptr::null());
+                return Err(e);
+            }
 
             // Compute pipeline. Pin the subgroup size to 32 (the
             // metaltile kernels' Apple-simdgroup assumption). On AMD
@@ -609,11 +655,26 @@ impl VulkanDevice {
                 pNext: ptr::null_mut(),
                 requiredSubgroupSize: 32,
             };
+            // Chain the pin only when subgroupSizeControl was actually
+            // enabled — on the plain fallback device it's a VUID violation
+            // on every pipeline create.
+            //
+            // KNOWN LIMIT: 32 is not validated against the device's
+            // min/max subgroup size, so a wave64-only device (CDNA)
+            // fails pipeline creation. RDNA (wave32/64) and NVIDIA/Intel
+            // (32-capable) are fine; querying
+            // VkPhysicalDeviceSubgroupSizeControlProperties is the fix
+            // when CDNA hardware is actually targeted.
+            let stage_pnext: *const c_void = if self.subgroup_size_control {
+                &req_subgroup as *const _ as *const c_void
+            } else {
+                ptr::null()
+            };
             let entry =
                 CStr::from_bytes_with_nul(ENTRY_POINT).unwrap().as_ptr();
             let stage = VkPipelineShaderStageCreateInfo {
                 sType: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                pNext: &req_subgroup as *const _ as *const c_void,
+                pNext: stage_pnext,
                 flags: 0,
                 stage: VK_SHADER_STAGE_COMPUTE_BIT,
                 module: shader_module,
@@ -630,7 +691,7 @@ impl VulkanDevice {
                 basePipelineIndex: -1,
             };
             let mut pipeline: VkPipeline_ = VK_NULL_HANDLE;
-            vk_check(
+            if let Err(e) = vk_check(
                 vkCreateComputePipelines(
                     self.device,
                     VK_NULL_HANDLE,
@@ -640,7 +701,12 @@ impl VulkanDevice {
                     &mut pipeline,
                 ),
                 "vkCreateComputePipelines",
-            )?;
+            ) {
+                vkDestroyPipelineLayout(self.device, layout, ptr::null());
+                vkDestroyDescriptorSetLayout(self.device, set_layout, ptr::null());
+                vkDestroyShaderModule(self.device, shader_module, ptr::null());
+                return Err(e);
+            }
 
             Ok(VulkanPipeline {
                 pipeline,
@@ -670,6 +736,7 @@ impl VulkanDevice {
         grid: [u32; 3],
         block: [u32; 3],
     ) -> Result<BTreeMap<String, Vec<u8>>, MetalTileError> {
+        let _exec = self.exec_lock.lock();
         // 1. Codegen: IR → GLSL + binding plan. Workgroup size matches
         //    the harness's `tpg` so single-warp / multi-warp / 3-D tpg
         //    kernels all map straight through.
@@ -705,13 +772,21 @@ impl VulkanDevice {
             }
         }
 
-        // 4. Build push-constant payload (constexprs in order, then `_n_elems`).
+        // 4. Build push-constant payload (constexprs in order, then `_n_elems`),
+        //    padding each member to its scalar-layout alignment so host
+        //    offsets match the GLSL `scalar` push-constant block (a tight
+        //    stream drifts as soon as a sub-4-byte constexpr precedes a
+        //    wider one).
         let mut push: Vec<u8> = Vec::with_capacity(plan.push_constant_bytes as usize);
         for ce in &kernel.constexprs {
             let name = ce.name.name();
             let bytes = buffers.get(name).ok_or_else(|| {
                 MetalTileError::Dispatch(format!("missing constexpr '{name}'"))
             })?;
+            let align = bytes.len().max(1);
+            while push.len() % align != 0 {
+                push.push(0);
+            }
             push.extend_from_slice(bytes);
         }
         if plan.has_n_elems {
@@ -724,7 +799,14 @@ impl VulkanDevice {
                     buffers.get(&p.name).map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
                 })
                 .unwrap_or(0);
+            while push.len() % 4 != 0 {
+                push.push(0);
+            }
             push.extend_from_slice(&n_elems.to_le_bytes());
+        }
+        // vkCmdPushConstants requires size % 4 == 0.
+        while push.len() % 4 != 0 {
+            push.push(0);
         }
 
         // 5. Allocate descriptor set + update with our buffers.
@@ -825,21 +907,25 @@ impl VulkanDevice {
             }
             vkCmdDispatch(cb, grid[0], grid[1], grid[2]);
 
-            // Barrier so the host map sees the compute writes.
+            // Barrier so the host map sees the compute writes. Fence/idle
+            // waits alone do NOT make device writes host-visible per the
+            // spec — HOST_READ in the submitted batch does, even for
+            // HOST_COHERENT memory. SHADER/TRANSFER read kept for any
+            // dispatch chained from this one.
             let barrier = VkMemoryBarrier {
                 sType: VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 pNext: ptr::null(),
                 srcAccessMask: VK_ACCESS_SHADER_WRITE_BIT,
-                // Host reads aren't a real Vulkan access stage; the host-
-                // coherent property + `vkDeviceWaitIdle` below carry the
-                // happens-before. We still flag SHADER_READ for any future
-                // dispatch chained from this one.
-                dstAccessMask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                dstAccessMask: VK_ACCESS_SHADER_READ_BIT
+                    | VK_ACCESS_TRANSFER_READ_BIT
+                    | VK_ACCESS_HOST_READ_BIT,
             };
             vkCmdPipelineBarrier(
                 cb,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_TRANSFER_BIT
+                    | VK_PIPELINE_STAGE_HOST_BIT,
                 0,
                 1,
                 &barrier,
@@ -866,8 +952,9 @@ impl VulkanDevice {
                 "vkQueueSubmit",
             )?;
             vk_check(vkQueueWaitIdle(self.queue), "vkQueueWaitIdle")?;
-            // No vkFreeCommandBuffers wired up — they live with the pool;
-            // we destroy the pool at device-drop.
+            // One-time-submit CB: free it now, or a corpus run accumulates
+            // thousands in the pool until device drop.
+            vkFreeCommandBuffers(self.device, self.command_pool, 1, &cb);
         }
 
         // 7. Read back outputs.
@@ -884,6 +971,10 @@ impl VulkanDevice {
         //    next `run_kernel` call doesn't exhaust descriptor slots
         //    (the corpus run quickly hits OUT_OF_POOL_MEMORY after a few
         //    hundred kernels otherwise). Buffers drop with `dev_bufs`.
+        //    KNOWN LIMIT: an error return between compile and here leaks
+        //    this call's pipeline objects + command buffer — acceptable
+        //    for the one-shot corpus/test paths that use run_kernel; the
+        //    resident decode path (run_pipeline_bound) frees per call.
         unsafe {
             vkDestroyPipeline(self.device, pipeline.pipeline, ptr::null());
             vkDestroyPipelineLayout(self.device, pipeline.layout, ptr::null());
@@ -1028,6 +1119,7 @@ impl VulkanDevice {
         &self,
         data: &[u8],
     ) -> Result<VulkanRawBuffer, MetalTileError> {
+        let _exec = self.exec_lock.lock();
         let size = (data.len().max(4)) as u64;
         let make_buffer = |usage: u32, props: u32| -> Result<(VkBuffer_, VkDeviceMemory), MetalTileError> {
             let bci = VkBufferCreateInfo {
@@ -1177,6 +1269,7 @@ impl VulkanDevice {
         push: &[u8],
         grid: [u32; 3],
     ) -> Result<(), MetalTileError> {
+        let _exec = self.exec_lock.lock();
         let plan = &pipeline.plan;
         if bufs.len() != plan.bindings.len() {
             return Err(MetalTileError::Dispatch(format!(
@@ -1272,17 +1365,24 @@ impl VulkanDevice {
             vkCmdDispatch(cb, grid[0], grid[1], grid[2]);
             // Make this dispatch's writes visible to the next dispatch that
             // binds the same resident buffer as an input (decode chains
-            // hundreds of these against persistent activations).
+            // hundreds of these against persistent activations), and to the
+            // host map after the fence (HOST_READ is required by the spec
+            // even on HOST_COHERENT memory — fence waits alone don't make
+            // device writes host-visible).
             let barrier = VkMemoryBarrier {
                 sType: VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 pNext: ptr::null(),
                 srcAccessMask: VK_ACCESS_SHADER_WRITE_BIT,
-                dstAccessMask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                dstAccessMask: VK_ACCESS_SHADER_READ_BIT
+                    | VK_ACCESS_TRANSFER_READ_BIT
+                    | VK_ACCESS_HOST_READ_BIT,
             };
             vkCmdPipelineBarrier(
                 cb,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_TRANSFER_BIT
+                    | VK_PIPELINE_STAGE_HOST_BIT,
                 0,
                 1,
                 &barrier,
@@ -1335,6 +1435,7 @@ impl VulkanDevice {
     /// responsible for the lifetime of every `VulkanRawBuffer` bound here (the
     /// ffai-vulkan resident-tensor cache owns them across the batch).
     pub fn run_pipeline_batch(&self, items: &[BatchDispatch]) -> Result<(), MetalTileError> {
+        let _exec = self.exec_lock.lock();
         if items.is_empty() {
             return Ok(());
         }
@@ -1382,7 +1483,11 @@ impl VulkanDevice {
             sType: VK_STRUCTURE_TYPE_MEMORY_BARRIER,
             pNext: ptr::null(),
             srcAccessMask: VK_ACCESS_SHADER_WRITE_BIT,
-            dstAccessMask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+            // HOST_READ so the batch's final writes are host-visible after
+            // the fence (spec requirement even on HOST_COHERENT memory).
+            dstAccessMask: VK_ACCESS_SHADER_READ_BIT
+                | VK_ACCESS_TRANSFER_READ_BIT
+                | VK_ACCESS_HOST_READ_BIT,
         };
 
         for it in items {
@@ -1462,7 +1567,9 @@ impl VulkanDevice {
                 vkCmdPipelineBarrier(
                     cb,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                        | VK_PIPELINE_STAGE_TRANSFER_BIT
+                        | VK_PIPELINE_STAGE_HOST_BIT,
                     0,
                     1,
                     &barrier,

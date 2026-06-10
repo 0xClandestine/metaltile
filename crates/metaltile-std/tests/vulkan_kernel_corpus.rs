@@ -42,7 +42,23 @@ fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
 }
 
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    // Non-finite-aware: a plain `(x - y).abs()` fold has two holes. (1)
+    // f32::max DISCARDS NaN operands, so an all-NaN output scores 0.0 and
+    // passes. (2) Agreeing non-finites must PASS: logits-mask kernels write
+    // -inf on both sides, and (-inf) - (-inf) is NaN. Bitwise-equal values
+    // (covers equal infinities) and NaN-on-both-sides count as agreement;
+    // any one-sided NaN/inf maps to +inf so garbage fails loudly.
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            if x == y || (x.is_nan() && y.is_nan()) {
+                0.0
+            } else {
+                let d = (x - y).abs();
+                if d.is_nan() { f32::INFINITY } else { d }
+            }
+        })
+        .fold(0.0f32, f32::max)
 }
 
 // Empty after Phase-3.2: linear-order `mt_subgroup_add` matches the
@@ -213,7 +229,18 @@ fn run_corpus_on_vulkan() {
         eprintln!("  · {k}");
     }
 
-    assert!(pass > 0, "no kernels passed on Vulkan — pipeline broken");
+    // `is_unsupported` buckets every "spirv:"/"shaderc_compile" error as
+    // UNSUPPORTED, so a codegen regression that breaks shader compile would
+    // not hit the error budget — the pass floor catches that drift (RDNA4
+    // baseline passes the full corpus; 3500 leaves headroom for device-cap
+    // variation, not for a broken emitter).
+    assert!(pass >= 3500, "only {pass} kernels passed on Vulkan — emitter or pipeline regression");
+    // The corpus is bit-accurate on RDNA4 (phase-3 baseline): any oracle
+    // mismatch on a supported kernel is a regression, not noise.
+    assert!(
+        mismatch == 0,
+        "{mismatch} Vulkan oracle mismatches on supported kernels — numerics regression"
+    );
     // Same exploratory budget as the HIP corpus — error counts above this
     // signal genuine codegen bugs, not numerics / device caps.
     let error_budget: u32 = 64;
