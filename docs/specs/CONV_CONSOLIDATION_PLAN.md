@@ -11,8 +11,6 @@
 ```
 convolution/
   mod.rs              (~25 lines)
-  PATTERNS.md
-  PLAN.md
   primitives.rs       (~100 lines)   weight decode + unpack sub-expressions
   conv1d.rs           (~300 lines)   all 1D convolutions
   conv2d.rs           (~500 lines)   all 2D convolutions (direct + depthwise + MMA)

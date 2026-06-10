@@ -226,7 +226,6 @@ is identical to hand-inlined code with zero overhead.
 ```
 convolution/
   mod.rs                          — module declarations
-  PATTERNS.md                     — this document
   primitives.rs                   — shared decode/unpack primitives (#[kernel])
 
   // ── 1D dense / dilated / transposed ─────────────────────────────

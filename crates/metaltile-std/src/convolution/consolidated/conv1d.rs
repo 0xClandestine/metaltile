@@ -1,6 +1,6 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Consolidated 1D convolution — see `../PLAN.md` for the full migration plan.
+//! Consolidated 1D convolution — see `docs/specs/CONV_CONSOLIDATION_PLAN.md` for the full migration plan.
 //!
 //! Two `#[kernel(variants(...))]` blocks cover all 1D conv kernels in this
 //! crate:
