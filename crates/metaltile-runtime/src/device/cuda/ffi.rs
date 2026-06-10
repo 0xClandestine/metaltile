@@ -159,6 +159,7 @@ pub const CUBLAS_OP_T: c_int = 1;
 pub const CUDA_R_16F: c_int = 2;
 pub const CUDA_R_32F: c_int = 0;
 pub const CUDA_R_16BF: c_int = 14;
+pub const CUDA_R_4F_E2M1: c_int = 33;
 
 // cublasComputeType_t
 pub const CUBLAS_COMPUTE_32F: c_int = 68;
@@ -329,6 +330,12 @@ pub const CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET: c_int = 6;
 // cublasLtMatmulDescAttributes_t
 pub const CUBLASLT_MATMUL_DESC_TRANSA: c_int = 3;
 pub const CUBLASLT_MATMUL_DESC_TRANSB: c_int = 4;
+pub const CUBLASLT_MATMUL_DESC_A_SCALE_POINTER: c_int = 17;
+pub const CUBLASLT_MATMUL_DESC_B_SCALE_POINTER: c_int = 18;
+pub const CUBLASLT_MATMUL_DESC_A_SCALE_MODE: c_int = 31;
+pub const CUBLASLT_MATMUL_DESC_B_SCALE_MODE: c_int = 32;
+// cublasLtMatmulMatrixScale_t
+pub const CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3: c_int = 1;
 // cublasLtMatmulPreferenceAttributes_t
 pub const CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES: c_int = 1;
 pub const CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK: c_int = 3;
