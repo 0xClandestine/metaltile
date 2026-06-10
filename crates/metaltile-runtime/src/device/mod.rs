@@ -1,4 +1,4 @@
-//! Device layer: Metal adapter, buffer pool, and GPU family detection.
+//! Device layer: Metal adapter, buffer pool, GPU family.
 
 #[cfg(target_os = "macos")]
 pub(crate) mod buffer_pool;

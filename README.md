@@ -1,12 +1,12 @@
 <div align="center">
   <h1>MetalTile</h1>
 
-  [![Apple Silicon][platform-badge]][platform-url]
+  [![Backends][backends-badge]][backends-url]
   [![Rust][rust-badge]][rust-url]
   [![License][license-badge]][license-url]
 
-  [platform-badge]: https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple&style=flat-square
-  [platform-url]: https://developer.apple.com/metal/
+  [backends-badge]: https://img.shields.io/badge/backends-MSL%20%C2%B7%20CUDA%20%C2%B7%20HIP%20%C2%B7%20Vulkan-black?style=flat-square
+  [backends-url]: #backends
   [rust-badge]: https://img.shields.io/badge/language-Rust-orange?logo=rust&style=flat-square
   [rust-url]: https://www.rust-lang.org/
   [license-badge]: https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square
@@ -18,7 +18,9 @@
 
 ---
 
-A Rust-embedded DSL for writing Apple Metal GPU kernels. Write tile-level algorithms in Rust, get optimized Metal Shading Language out — verified against, and frequently faster than, hand-tuned MLX.
+A Rust-embedded DSL for writing GPU kernels once and running them everywhere. Write tile-level algorithms in Rust with `#[kernel]`, and the same kernel source lowers to **four GPU backends** — Apple Metal (MSL), NVIDIA (CUDA), AMD (HIP/ROCm), and any Vulkan-class GPU (SPIR-V) — verified against, and frequently faster than, hand-tuned MLX.
+
+Write once, run on Apple, NVIDIA, AMD, and Vulkan-class GPUs — no per-backend kernel rewrite. metaltile is the kernel layer beneath an LLM inference engine that runs a 30B-parameter hybrid model (Mamba2 SSM + 128-expert MoE + GQA attention) resident-decode on a single Grace-Blackwell (GB10) box; the same kernels also run on Apple GPUs.
 
 ## Installation
 
@@ -32,7 +34,7 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 
 ## Getting Started
 
-**1. Write a kernel.** Annotate a generic Rust function with `#[kernel(bench(...))]` — MetalTile generates `f32`, `f16`, and `bfloat16` Metal variants from a single definition and registers it against its MLX reference:
+**1. Write a kernel.** Annotate a generic Rust function with `#[kernel(bench(...))]` — MetalTile generates `f32`, `f16`, and `bfloat16` variants from a single definition, lowers them to each enabled GPU backend (MSL by default; CUDA / HIP / Vulkan opt-in), and registers it against its MLX reference:
 
 <table>
 <tr>
@@ -105,39 +107,30 @@ Read the [docs](docs/) to learn more.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    subgraph User["Your crate"]
-        K["#[kernel]<br/>fn mt_exp&lt;T&gt;(..)"]
-        B["#[bench]<br/>fn exp_bench(dt)"]
-        T["#[test_kernel]<br/>fn exp_test(dt)"]
-    end
+One `#[kernel]` DSL, four GPU backends. Your kernel lowers to a shared IR; the codegen passes optimise it once; then each backend emitter turns that IR into the target's native shader source. Two **peer hosts** consume the same kernels with no FFI between them — a Swift host (Metal/Apple, ships to the App Store) and the Rust host (`metaltile-runtime` + downstream engine crates).
 
-    K --> IR["MetalTile IR<br/>(Op variants)"]
-    IR --> Passes["codegen passes<br/>vectorize · unroll · DCE · ..."]
-    Passes --> MSL[".metal source"]
-    MSL --> Metallib["kernels.metallib<br/>(xcrun metal -c)"]
+![metaltile architecture](docs/architecture.png)
 
-    subgraph CLI["tile CLI"]
-        Build["tile build"]
-        Bench["tile bench"]
-        Test["tile test"]
-        Inspect["tile inspect"]
-    end
+`#[kernel]` lowers your DSL function to IR; the codegen passes optimise it; each backend emitter then produces native shader source — MSL (`.metal`, compiled by `xcrun metal`), CUDA C++ (NVRTC → PTX at runtime), HIP C++ (hipRTC → AMDGPU code object), or SPIR-V (via shaderc). `#[bench]` / `#[test_kernel]` are optional annotations on the same function that register a setup callback the runner uses to dispatch the kernel and measure it (or diff against a CPU oracle).
 
-    B -.registers.-> Bench
-    T -.registers.-> Test
-    K -.discovered by.-> Build
-    K -.discovered by.-> Inspect
-    Build --> MSL
-    Bench --> Runner["GpuRunner<br/>(in-process)"]
-    Test --> Runner
-    Runner --> Metallib
-```
+### Backends
 
-`#[kernel]` lowers your DSL function to IR; the codegen passes optimise it; MSL emit produces a `.metal` source that `xcrun metal` compiles to a `metallib`. `#[bench]` / `#[test_kernel]` are optional annotations on the same function that register a setup callback the runner uses to dispatch the kernel and measure it (or diff against a CPU oracle).
+| Backend | Target GPU | Compile path | Status |
+|---|---|---|---|
+| **MSL** | Apple (Metal) | `.metal` → `metallib` (`xcrun metal`) | Stable — default, zero-config on macOS |
+| **CUDA** | NVIDIA (sm_90 / 120 / 121, e.g. GB10) | CUDA C++ → NVRTC → PTX, runtime compile | Lands in a follow-up PR (`--features cuda`) |
+| **HIP** | AMD (ROCm, `gfx*`) | HIP C++ → hipRTC → AMDGPU code object | Lands in a follow-up PR (`--features hip`) |
+| **Vulkan** | Any Vulkan-class GPU | SPIR-V via shaderc → Vulkan compute | Lands in a follow-up PR (`--features vulkan`) |
 
-> Today `tile bench` / `tile test` dispatch through the in-process `GpuRunner`; moving the runner into a dedicated subprocess (for isolation and parallelism) is planned.
+The non-Metal backends are opt-in Cargo features so the macOS Metal path stays zero-config and dependency-light. Each requires its toolchain/driver at link/run time (CUDA toolkit, ROCm, or the Vulkan SDK). HIP and Vulkan have the full kernel set implemented (codegen-complete); end-to-end model validation is in progress — they are not yet verified against a full model run. See `specs/AMD_BACKEND_SPEC.md` and `specs/VULKAN_BACKEND_SPEC.md`.
+
+The CUDA runtime (`crates/metaltile-runtime/src/device/cuda/`) adds NVRTC runtime kernel compile, a dedicated capturable non-blocking stream, CUDA-graph capture hooks (`begin_capture` / `end_capture` / `graph_launch`), a buffer pool, pinned async host-to-device copies, and an optional `--fmad` codegen gate (`MT_FMAD=1`). See `specs/CUDA_BACKEND_SPEC.md`.
+
+> Today `tile bench` / `tile test` dispatch through the in-process `GpuRunner` on the Metal path; moving the runner into a dedicated subprocess (for isolation and parallelism) and wiring the CLI harness across all backends (Phase 6) is planned.
+
+## Scope & naming
+
+metaltile began as a Metal-only (MSL) kernel/code generator. It now emits MSL, CUDA, HIP, and Vulkan (SPIR-V) from a single `#[kernel]` DSL, so the "metal" in the name understates the current scope. A rename is under discussion to better reflect the multi-backend reality — a candidate is **TileForge**, but this is not final and is open for discussion. The current name (`metaltile`) still applies everywhere until any rename is decided.
 
 ## CLI reference
 
@@ -153,6 +146,20 @@ flowchart LR
 | `tile update` | Install the latest release (or build from a PR / commit). |
 
 See [`docs/cli.md`](docs/cli.md) for the full flag surface.
+
+## Crates
+
+| Crate | Role |
+|---|---|
+| `metaltile-core` | Core IR types and `Op` variants shared by every backend. |
+| `metaltile-macros` | The `#[kernel]` / `#[bench]` / `#[test_kernel]` proc-macros. |
+| `metaltile-codegen` | IR optimisation passes + the four backend emitters (`msl/`, `cuda/`, `hip/`, `spirv/`). |
+| `metaltile-runtime` | Host runtime + per-backend device modules (`device/{metal,cuda,hip,vulkan}/`); CUDA/HIP/Vulkan behind the `cuda`/`hip`/`vulkan` features. |
+| `metaltile-std` | Kernel standard library — bench/test metadata and shared type definitions. |
+| `metaltile` | Umbrella crate re-exporting the public DSL surface. |
+| `metaltile-cli` | The `tile` CLI — build, bench, test, inspect. |
+
+The Swift host (`MetalTileSwift`, Metal/Apple, App Store) is a separate peer consumer of the same kernels and lives outside this workspace.
 
 ## Contributing
 

@@ -400,6 +400,17 @@ pub mod kernel_tests {
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-2, 1e-1])]
     fn test_mt_rms_norm(dt: DType) -> TestSetup { setup(4, 512, dt) }
 
+    // Non-power-of-two TPG: n=1536 (Qwen2.5-1.5B hidden) → tpg = n/4 = 384
+    // = 2^7·3, which is NOT a power of two. The threadgroup barrier-tree
+    // reduction must round its start stride up to the next power of two and
+    // bound-guard `tid + s < tpg`, else it silently DROPS lanes (a plain
+    // tpg/2 halving tree loses the factor-of-3 lanes → sum-of-squares short
+    // by ~1/3, corrupting RMSNorm). The corpus previously only covered
+    // power-of-two tpg (512→128), so this regression went undetected and
+    // broke real-model inference on the Vulkan/SPIR-V backend.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-2, 1e-1])]
+    fn test_mt_rms_norm_npot_tpg(dt: DType) -> TestSetup { setup(3, 1536, dt) }
+
     // Non-128-aligned wide-row coverage (SmolVLM2 d=960; 960 = 7·128 +
     // 64 is NOT a multiple of 128, so `mt_rms_norm` can't dispatch it).
     // `mt_rms_norm_wide` strides over the row with a fixed TPG=1024 and
