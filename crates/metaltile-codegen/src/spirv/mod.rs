@@ -2151,6 +2151,9 @@ pub fn safe_glsl_ident(name: &str) -> String {
         "transpose",
         "determinant",
         "inverse",
+        // Tessellation storage qualifier — a plain variable named `patch`
+        // is a hard syntax error in GLSL (im2col/unfold kernels use it).
+        "patch",
     ];
     if RESERVED.contains(&name) { format!("_b_{name}") } else { name.to_string() }
 }
