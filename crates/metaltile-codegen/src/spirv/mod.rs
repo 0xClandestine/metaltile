@@ -9,6 +9,14 @@
 //! (`VULKAN_BACKEND_SPEC.md §5`) is the planned upgrade once the op
 //! surface stabilises.
 //!
+//! TODO(follow-up): split this module — it has grown past 2400 lines.
+//! Natural seams: `preamble.rs` (types/decls/push-constant block),
+//! `emit.rs` (the per-op walker), `reduce.rs` (workgroup/subgroup
+//! reductions), `coop.rs` (CoopTile/MMA emission), `binding.rs`
+//! (`GlslBindingPlan`), keeping `mod.rs` as the `GlslGenerator` struct +
+//! `CodegenBackend` impl. Pure code motion, deferred until after this
+//! stack merges to keep the hardware-validated diff reviewable.
+//!
 //! ## Phase 2 coverage
 //!
 //! - **`KernelMode::Elementwise`** — 1-D bounds-guarded gid;

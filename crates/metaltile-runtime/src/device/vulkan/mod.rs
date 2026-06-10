@@ -6,6 +6,14 @@
 //! compile GLSL → SPIR-V via shaderc, build a compute pipeline, dispatch.
 //! Phase 1 covers the elementwise smoke path (vector_add).
 //!
+//! TODO(follow-up): split this module — it has grown past 1600 lines.
+//! Natural seams: `init.rs` (instance/device/queue creation), `buffer.rs`
+//! (`VulkanBuffer`/`VulkanRawBuffer` + alloc/upload/download), `pipeline.rs`
+//! (shaderc compile + `VulkanPipeline` cache), `dispatch.rs` (`run_kernel` /
+//! `run_pipeline_bound` / `run_pipeline_batch`), keeping `mod.rs` as the
+//! `VulkanDevice` struct + public surface. Pure code motion, deferred until
+//! after this stack merges to keep the hardware-validated diff reviewable.
+//!
 //! ## Memory model
 //!
 //! For Phase-1 simplicity we use a single host-visible+device-local memory
