@@ -352,6 +352,27 @@ pub fn ffai_cast_f16_f32(src: Tensor<f16>, mut dst: Tensor<f32>, #[constexpr] n:
     }
 }
 
+/// Elementwise dtype cast f32 → bf16. Same compaction as the f16 variant, for
+/// models whose residual stream / cache dtype is bf16 (wider exponent range
+/// than f16, so large-magnitude residuals survive the narrowing).
+#[kernel]
+pub fn ffai_cast_f32_bf16(src: Tensor<f32>, mut dst: Tensor<bf16>, #[constexpr] n: u32) {
+    let i = program_id::<0>();
+    if i < n {
+        store(dst[i], load(src[i]).cast::<bf16>());
+    }
+}
+
+/// Elementwise dtype cast bf16 → f32 (reverse): widen the bf16 residual back
+/// to f32 for ops that consume f32 activations.
+#[kernel]
+pub fn ffai_cast_bf16_f32(src: Tensor<bf16>, mut dst: Tensor<f32>, #[constexpr] n: u32) {
+    let i = program_id::<0>();
+    if i < n {
+        store(dst[i], load(src[i]).cast::<f32>());
+    }
+}
+
 /// Roll a causal-conv state ON-DEVICE: `new = [old[conv_dim..], xbc]` (drop the
 /// oldest conv_dim, append the current input) — keeps the Mamba conv history on
 /// the GPU. `keep = (kc-2)*conv_dim`; indices clamped so both select branches
