@@ -5,20 +5,19 @@
 //! Direct port of `hip_kernel_corpus.rs` / `cuda_kernel_corpus.rs`. The
 //! `VulkanDevice::run_kernel` signature matches the CUDA / HIP one (3-D
 //! grid × 3-D block, `BTreeMap` of param bytes), so the iteration loop is
-//! the same; only the device handle differs.
-//!
-//! Phase 2 of `VULKAN_BACKEND_SPEC.md`: measures what fraction of the
-//! corpus passes via the **portable** subgroup-width-agnostic reductions.
-//! Subgroup-op fast paths, cooperative-matrix MMA, fp16/i8 dtypes are
-//! Phase 3+ and surface here as UNSUPPORTED.
+//! the same; only the device handle differs. The triage matches the CUDA
+//! run so results are directly comparable (`VULKAN_BACKEND_SPEC.md`;
+//! baseline: full corpus on RDNA4 via the portable subgroup-width-agnostic
+//! reductions).
 //!
 //! Runs only with `--features vulkan`.
 #![cfg(feature = "vulkan")]
 
 use std::collections::BTreeMap;
 
+use metaltile_codegen::error::Error as CodegenError;
 use metaltile_core::dtype::DType;
-use metaltile_runtime::VulkanDevice;
+use metaltile_runtime::{MetalTileError, VulkanDevice};
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
@@ -79,9 +78,9 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-// Empty after Phase-3.2: linear-order `mt_subgroup_add` matches the
-// CPU oracle's `iter().sum()` rounding exactly, eliminating the last
-// f32-ULP drift on the gated-delta recurrence.
+/// Kernels expected to *generate + run* but mismatch the oracle on Vulkan,
+/// with reasons. A failure NOT matching an entry is a regression and fails
+/// the test.
 const KNOWN_HARD: &[(&str, &str)] = &[
     // f32-only, 1.9x over its 1.5e-2 tol: the mel filterbank accumulates
     // hundreds of sin/cos twiddle products, and GLSL's transcendental
@@ -92,40 +91,22 @@ const KNOWN_HARD: &[(&str, &str)] = &[
 
 fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
-fn is_unsupported(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    [
-        "phase 1",
-        "phase 2",
-        "phase 3",
-        "phase 4",
-        "not supported",
-        "not yet implemented",
-        "not yet supported",
-        "strided",
-        "kernelmode",
-        "multi-dimensional",
-        "transform",
-        "secondary",
-        "dtype",
-        "f16",
-        "bf16",
-        "i8",
-        // Shaderc compile failures we treat as UNSUPPORTED so the corpus
-        // result reflects bit-accuracy on what's actually wired, not
-        // shader-language gaps.
-        "shaderc_compile",
-        "spirv:",
-        "spirv ",
-        "decode-",
-        // Vulkan device limits — workgroup size cap, descriptor count,
-        // push-constant size — these are dtype-orthogonal device caps
-        // rather than codegen bugs.
-        "vkresult=",
-        "no memory type",
-    ]
-    .iter()
-    .any(|p| m.contains(p))
+/// UNSUPPORTED is decided on the TYPED error, not message sniffing
+/// (mirrors `cuda_kernel_corpus.rs`):
+/// * `Codegen(UnsupportedOp)` — every codegen coverage gap (cooperative
+///   MMA, multi-dim index, dtype gaps, ops not wired yet) is raised as
+///   this variant by the GLSL/SPIR-V emitter.
+/// * `DeviceCapability` — kernels the codegen *does* cover but the target
+///   physically cannot run, surfaced before launch.
+///
+/// Anything else (shaderc compile failure, VkResult rejection, missing
+/// buffer) on a kernel we claim to support stays a hard ERROR.
+fn is_unsupported(e: &MetalTileError) -> bool {
+    matches!(
+        e,
+        MetalTileError::Codegen(CodegenError::UnsupportedOp(_))
+            | MetalTileError::DeviceCapability(_)
+    )
 }
 
 #[test]
@@ -202,12 +183,13 @@ fn run_corpus_on_vulkan() {
                     }
                 },
                 Err(e) => {
-                    let msg = e.to_string();
                     if known_hard(&label) {
                         known += 1;
-                    } else if is_unsupported(&msg) {
+                    } else if is_unsupported(&e) {
                         unsupported += 1;
-                        let reason = msg
+                        // Bucket by the short reason (first line / key phrase).
+                        let reason = e
+                            .to_string()
                             .lines()
                             .next()
                             .unwrap_or("?")
@@ -219,7 +201,7 @@ fn run_corpus_on_vulkan() {
                         *unsup_reasons.entry(reason).or_default() += 1;
                     } else {
                         error += 1;
-                        hard_failures.push(format!("ERROR {label}: {msg}"));
+                        hard_failures.push(format!("ERROR {label}: {e}"));
                     }
                 },
             }
@@ -265,11 +247,10 @@ fn run_corpus_on_vulkan() {
         eprintln!("  · {k}");
     }
 
-    // `is_unsupported` buckets every "spirv:"/"shaderc_compile" error as
-    // UNSUPPORTED, so a codegen regression that breaks shader compile would
-    // not hit the error budget — the pass floor catches that drift (RDNA4
-    // baseline passes the full corpus; 3500 leaves headroom for device-cap
-    // variation, not for a broken emitter).
+    // Pass floor: a regression that bucketed kernels as UNSUPPORTED (typed
+    // `Codegen(UnsupportedOp)`) would otherwise shrink coverage silently.
+    // The RDNA4 baseline passes the full corpus; 3500 leaves headroom for
+    // device-cap variation, not for a broken emitter.
     assert!(pass >= 3500, "only {pass} kernels passed on Vulkan — emitter or pipeline regression");
     // The corpus is bit-accurate on RDNA4 (phase-3 baseline): any oracle
     // mismatch on a supported kernel is a regression, not noise.
@@ -277,8 +258,10 @@ fn run_corpus_on_vulkan() {
         mismatch == 0,
         "{mismatch} Vulkan oracle mismatches on supported kernels — numerics regression"
     );
-    // Same exploratory budget as the HIP corpus — error counts above this
-    // signal genuine codegen bugs, not numerics / device caps.
+    // Hard errors (shaderc compile / VkResult failures) signal genuine
+    // codegen bugs, not numerics. The RDNA4 baseline runs clean; the budget
+    // leaves headroom for driver/device variation without letting a broad
+    // regression through.
     let error_budget: u32 = 64;
     assert!(
         error <= error_budget,

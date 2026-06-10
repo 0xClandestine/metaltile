@@ -5,22 +5,20 @@
 //! Direct port of `cuda_kernel_corpus.rs` — the harness contract
 //! (param/constexpr byte maps → `run_kernel` → compare outputs) is
 //! identical because `HipDevice::run_kernel` has the same signature
-//! as `CudaDevice::run_kernel`, and the HipGenerator inherits its
-//! op-walker from CudaGenerator (only the textual transform differs).
-//!
-//! Phase 2 of `AMD_BACKEND_SPEC.md`: measures what fraction of the
-//! ~4164-kernel corpus passes on AMD RDNA wave32 (the user's RX 9070 XT,
-//! gfx1201) with **zero additional codegen work** beyond the Phase-1
-//! HIP transform. The PASS/MISMATCH/UNSUPPORTED/ERROR triage stays
-//! the same so the result is directly comparable to the CUDA run.
+//! as `CudaDevice::run_kernel`, and the HIP backend shares the CUDA
+//! op-walker (only the vendor-dialect lowering differs). The
+//! PASS/MISMATCH/UNSUPPORTED/ERROR triage matches the CUDA run so
+//! results are directly comparable (`AMD_BACKEND_SPEC.md`; baseline:
+//! full corpus on RDNA wave32, RX 9070 XT / gfx1201).
 //!
 //! Runs only with `--features hip`.
 #![cfg(feature = "hip")]
 
 use std::collections::BTreeMap;
 
+use metaltile_codegen::error::Error as CodegenError;
 use metaltile_core::dtype::DType;
-use metaltile_runtime::HipDevice;
+use metaltile_runtime::{HipDevice, MetalTileError};
 
 fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
@@ -81,41 +79,32 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
-/// Kernels expected to *generate + run* but mismatch the oracle on HIP
-/// today. Mostly the same as CUDA, but the list may differ — the AMD
-/// device math (e.g. precise `expf` rounding) is not bit-identical to
-/// NVIDIA's. We seed empty and append as the corpus reveals them.
-// Empty after Phase-3.2: linear-order simd_sum + Markstein divide +
-// NR-refined rsqrt (now wired through TargetProfile::precise_simd_sum)
-// + a documented 1e-2 tol on the gain-sensitive `no_gqa` variant
-// (HIP's OCML expf/logf rounds within ~2 ULP of the Rust libm oracle,
-// which compounds across 3 tokens to ~6e-3 at magnitude 24K — the 1e-2
-// bump = 3 ULPs of headroom, still tight for a recurrence). 100%
-// bit-accurate to the per-kernel band.
+/// Kernels expected to *generate + run* but mismatch the oracle on HIP,
+/// with reasons. May differ from CUDA's list — the AMD device math (e.g.
+/// precise `expf` rounding) is not bit-identical to NVIDIA's. Currently
+/// empty: the full corpus is within its per-kernel tolerance bands on
+/// RDNA4. A failure NOT matching an entry is a regression and fails the
+/// test.
 const KNOWN_HARD: &[(&str, &str)] = &[];
 
 fn known_hard(name: &str) -> bool { KNOWN_HARD.iter().any(|(k, _)| name.contains(k)) }
 
-fn is_unsupported(msg: &str) -> bool {
-    let m = msg.to_lowercase();
-    [
-        "phase 1",
-        "phase 2",
-        "not supported",
-        "not yet implemented",
-        "strided",
-        "kernelmode",
-        "multi-dimensional",
-        "transform",
-        "secondary",
-        // HIP-specific compile failures we treat as "kernel uses a CUDA
-        // construct HIP doesn't accept" — counted as UNSUPPORTED so the
-        // corpus result tracks what's bit-accurate, not what'd hit a
-        // future textual-transform extension.
-        "hiprtc",
-    ]
-    .iter()
-    .any(|p| m.contains(p))
+/// UNSUPPORTED is decided on the TYPED error, not message sniffing
+/// (mirrors `cuda_kernel_corpus.rs`):
+/// * `Codegen(UnsupportedOp)` — every codegen coverage gap (MMA/cooperative,
+///   Tile2D, multi-dim index, ops not wired yet) is raised as this variant.
+/// * `DeviceCapability` — kernels the codegen *does* cover but the target
+///   arch physically cannot run, surfaced before launch. These reflect
+///   bit-accuracy on what the arch CAN run, so they are not hard failures.
+///
+/// Anything else (hipRTC compile failure, launch error, missing buffer) on
+/// a kernel we claim to support stays a hard ERROR.
+fn is_unsupported(e: &MetalTileError) -> bool {
+    matches!(
+        e,
+        MetalTileError::Codegen(CodegenError::UnsupportedOp(_))
+            | MetalTileError::DeviceCapability(_)
+    )
 }
 
 #[test]
@@ -197,12 +186,13 @@ fn run_corpus_on_hip() {
                     }
                 },
                 Err(e) => {
-                    let msg = e.to_string();
                     if known_hard(&label) {
                         known += 1;
-                    } else if is_unsupported(&msg) {
+                    } else if is_unsupported(&e) {
                         unsupported += 1;
-                        let reason = msg
+                        // Bucket by the short reason (first line / key phrase).
+                        let reason = e
+                            .to_string()
                             .lines()
                             .next()
                             .unwrap_or("?")
@@ -214,7 +204,7 @@ fn run_corpus_on_hip() {
                         *unsup_reasons.entry(reason).or_default() += 1;
                     } else {
                         error += 1;
-                        hard_failures.push(format!("ERROR {label}: {msg}"));
+                        hard_failures.push(format!("ERROR {label}: {e}"));
                     }
                 },
             }
@@ -250,29 +240,22 @@ fn run_corpus_on_hip() {
         }
     }
 
-    // Pass floor (same rationale as the Vulkan corpus): hipRTC compile
-    // failures land in ERROR with a budget, but a regression that bucketed
-    // kernels as UNSUPPORTED would otherwise shrink coverage silently.
+    // Pass floor: a regression that bucketed kernels as UNSUPPORTED (typed
+    // `Codegen(UnsupportedOp)`) would otherwise shrink coverage silently.
+    // The RDNA4 baseline passes the full corpus; 3500 leaves headroom for
+    // device-cap variation, not for a broken emitter.
     assert!(pass >= 3500, "only {pass} kernels passed on HIP — emitter or pipeline regression");
-    // Numeric mismatches are distinct from the launch-error budget below:
+    // Numeric mismatches are distinct from the error budget below:
     // KNOWN_HARD absorbs the documented tol-band outliers, so any other
     // oracle mismatch on a kernel that RAN is a regression.
     assert!(
         mismatch == 0,
         "{mismatch} HIP oracle mismatches on supported kernels — numerics regression"
     );
-    // Phase-2 NOTE: unlike CUDA we do not yet require zero hard-failures.
-    // First run is exploratory — the AMD device math will produce some
-    // tol-band mismatches on accumulation-heavy kernels that need a
-    // tightened oracle or a per-kernel tol bump. The test fails only if
-    // the *error* (compile/launch) count exceeds a small budget — those
-    // signal genuine codegen bugs, not numerics.
-    // First HIP corpus pass on RDNA 4: ~4067 PASS / 4164 expected, with
-    // the remaining ~96 being `moe_gather_qmm_bm64_mpp` family failures
-    // (`hipModuleLaunchKernel: invalid argument` — the MPP cooperative
-    // path needs the wave32 / shared-mem opt-in tuned, the same Phase-5
-    // backlog tracked for CUDA's `mpp::matmul2d`). Budget set to comfortably
-    // cover the known MPP backlog while still catching net-new codegen bugs.
+    // Hard errors (hipRTC compile / launch failures) signal genuine codegen
+    // bugs, not numerics. The RDNA4 baseline runs clean; the budget leaves
+    // headroom for arch variation (e.g. cooperative/MPP launch limits on
+    // other wavefront configs) without letting a broad regression through.
     let error_budget: u32 = 128;
     assert!(
         error <= error_budget,
