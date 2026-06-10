@@ -1317,30 +1317,20 @@ impl CudaGenerator {
         for blk in std::iter::once(&kernel.body).chain(kernel.blocks.values()) {
             for op in &blk.ops {
                 if let Op::CoopTileSetup {
-                    name: nm,
-                    m,
-                    n,
-                    k,
-                    ta,
-                    tb,
-                    tc,
-                    acc_mode,
-                    exec_scope,
-                    ..
+                    name: nm, m, n, k, ta, tb, tc, acc_mode, exec_scope, ..
                 } = op
+                    && nm == name
                 {
-                    if nm == name {
-                        return Some((
-                            *m,
-                            *n,
-                            *k,
-                            *ta,
-                            *tb,
-                            *tc,
-                            matches!(acc_mode, CoopTileAccMode::MultiplyAccumulate),
-                            matches!(exec_scope, CoopTileScope::SimdGroup),
-                        ));
-                    }
+                    return Some((
+                        *m,
+                        *n,
+                        *k,
+                        *ta,
+                        *tb,
+                        *tc,
+                        matches!(acc_mode, CoopTileAccMode::MultiplyAccumulate),
+                        matches!(exec_scope, CoopTileScope::SimdGroup),
+                    ));
                 }
             }
         }

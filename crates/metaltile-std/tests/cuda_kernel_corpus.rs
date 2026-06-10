@@ -172,12 +172,13 @@ fn run_corpus_on_cuda() {
             let label = format!("{} [{dt}]", t.name());
 
             // Debug: DUMP=<exact kernel name> prints its generated CUDA.
-            if let Ok(want) = std::env::var("DUMP") {
-                if t.name() == want && dt == DType::F32 {
-                    use metaltile_codegen::{CodegenBackend, CudaGenerator};
-                    if let Ok(src) = CudaGenerator::new().generate(kernel) {
-                        eprintln!("==== {} ====\n{src}\n==== end ====", t.name());
-                    }
+            if let Ok(want) = std::env::var("DUMP")
+                && t.name() == want
+                && dt == DType::F32
+            {
+                use metaltile_codegen::{CodegenBackend, CudaGenerator};
+                if let Ok(src) = CudaGenerator::new().generate(kernel) {
+                    eprintln!("==== {} ====\n{src}\n==== end ====", t.name());
                 }
             }
 
