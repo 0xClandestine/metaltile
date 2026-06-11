@@ -15,7 +15,7 @@ publish = false
 workspace = true
 
 [features]
-# CUDA device runtime (`CudaDevice` and friends). Forwards to
+# CUDA / NVIDIA device runtime (`CudaDevice` and friends). Forwards to
 # metaltile-runtime/cuda so downstream tile projects only name the facade.
 cuda = ["metaltile-runtime/cuda"]
 # HIP / ROCm device runtime (`HipDevice` and friends). Forwards to
@@ -34,6 +34,7 @@ inventory.workspace = true
 serde.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true
+regex.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

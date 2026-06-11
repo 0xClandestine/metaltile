@@ -510,7 +510,7 @@ pub mod kernel_tests {
     }
 
     /// Decode one E4M3 fp8 code (bias 7; subnormal when `e_raw == 0`).
-    pub(crate) fn fp8_e4m3_decode(code: u32) -> f32 {
+    pub(crate) fn fp8_mt_decode_e4m3(code: u32) -> f32 {
         let sign = 1.0 - 2.0 * (code >> 7) as f32;
         let c = code & 0x7F;
         let e = c >> 3;
@@ -574,7 +574,7 @@ pub mod kernel_tests {
                     let dec = if bits == 4 {
                         fp4_decode(codes[nc * k + d])
                     } else {
-                        fp8_e4m3_decode(codes[nc * k + d])
+                        fp8_mt_decode_e4m3(codes[nc * k + d])
                     };
                     acc += scales[nc * gspr + g] * dec * x[mr * k + d];
                 }

@@ -14,10 +14,12 @@
 //! | [`emit`] | Write [`ProtocolMessage`] lines to stdout |
 //! | [`args`] | [`RunnerArgs`] — arg-parsing for the subprocess |
 //! | [`harness`] | [`RunnerHarness`] — orchestrates bench/test/build/inspect |
+//! | [`backend`] | `--backend cuda/hip/vulkan` dispatch over the device runtimes |
 //! | [`profile`] | CPU occupancy / register / bottleneck estimation |
 //! | [`device_specs`] | Per-GPU peak bandwidth + compute specs for roofline |
 
 pub mod args;
+pub(crate) mod backend;
 pub mod device_specs;
 pub mod emit;
 pub mod gpu;

@@ -1144,3 +1144,201 @@ unsafe extern "C" {
 // Silence unused param warnings on c_uint imports if any.
 #[allow(dead_code)]
 fn _force_use_uint(_x: c_uint) {}
+
+// ── Timestamp queries (bench_kernel) ──────────────────────────────────────
+
+pub type VkQueryPool = u64;
+
+pub const VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO: u32 = 11;
+pub const VK_QUERY_TYPE_TIMESTAMP: u32 = 2;
+pub const VK_QUERY_RESULT_64_BIT: VkFlags = 0x0000_0001;
+pub const VK_QUERY_RESULT_WAIT_BIT: VkFlags = 0x0000_0002;
+pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: u32 = 0x0000_0001;
+pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: u32 = 0x0000_2000;
+
+#[repr(C)]
+pub struct VkQueryPoolCreateInfo {
+    pub sType: u32,
+    pub pNext: *const c_void,
+    pub flags: VkFlags,
+    pub queryType: u32,
+    pub queryCount: u32,
+    pub pipelineStatistics: VkFlags,
+}
+
+// ── Physical-device properties (device name + timestampPeriod) ────────────
+//
+// Full Vulkan 1.0 layout — `limits.timestampPeriod` (ns per timestamp tick)
+// and `deviceName` are the fields we read; the rest exist so the struct's
+// size/offsets match the C ABI.
+
+#[repr(C)]
+pub struct VkPhysicalDeviceLimits {
+    pub maxImageDimension1D: u32,
+    pub maxImageDimension2D: u32,
+    pub maxImageDimension3D: u32,
+    pub maxImageDimensionCube: u32,
+    pub maxImageArrayLayers: u32,
+    pub maxTexelBufferElements: u32,
+    pub maxUniformBufferRange: u32,
+    pub maxStorageBufferRange: u32,
+    pub maxPushConstantsSize: u32,
+    pub maxMemoryAllocationCount: u32,
+    pub maxSamplerAllocationCount: u32,
+    pub bufferImageGranularity: VkDeviceSize,
+    pub sparseAddressSpaceSize: VkDeviceSize,
+    pub maxBoundDescriptorSets: u32,
+    pub maxPerStageDescriptorSamplers: u32,
+    pub maxPerStageDescriptorUniformBuffers: u32,
+    pub maxPerStageDescriptorStorageBuffers: u32,
+    pub maxPerStageDescriptorSampledImages: u32,
+    pub maxPerStageDescriptorStorageImages: u32,
+    pub maxPerStageDescriptorInputAttachments: u32,
+    pub maxPerStageResources: u32,
+    pub maxDescriptorSetSamplers: u32,
+    pub maxDescriptorSetUniformBuffers: u32,
+    pub maxDescriptorSetUniformBuffersDynamic: u32,
+    pub maxDescriptorSetStorageBuffers: u32,
+    pub maxDescriptorSetStorageBuffersDynamic: u32,
+    pub maxDescriptorSetSampledImages: u32,
+    pub maxDescriptorSetStorageImages: u32,
+    pub maxDescriptorSetInputAttachments: u32,
+    pub maxVertexInputAttributes: u32,
+    pub maxVertexInputBindings: u32,
+    pub maxVertexInputAttributeOffset: u32,
+    pub maxVertexInputBindingStride: u32,
+    pub maxVertexOutputComponents: u32,
+    pub maxTessellationGenerationLevel: u32,
+    pub maxTessellationPatchSize: u32,
+    pub maxTessellationControlPerVertexInputComponents: u32,
+    pub maxTessellationControlPerVertexOutputComponents: u32,
+    pub maxTessellationControlPerPatchOutputComponents: u32,
+    pub maxTessellationControlTotalOutputComponents: u32,
+    pub maxTessellationEvaluationInputComponents: u32,
+    pub maxTessellationEvaluationOutputComponents: u32,
+    pub maxGeometryShaderInvocations: u32,
+    pub maxGeometryInputComponents: u32,
+    pub maxGeometryOutputComponents: u32,
+    pub maxGeometryOutputVertices: u32,
+    pub maxGeometryTotalOutputComponents: u32,
+    pub maxFragmentInputComponents: u32,
+    pub maxFragmentOutputAttachments: u32,
+    pub maxFragmentDualSrcAttachments: u32,
+    pub maxFragmentCombinedOutputResources: u32,
+    pub maxComputeSharedMemorySize: u32,
+    pub maxComputeWorkGroupCount: [u32; 3],
+    pub maxComputeWorkGroupInvocations: u32,
+    pub maxComputeWorkGroupSize: [u32; 3],
+    pub subPixelPrecisionBits: u32,
+    pub subTexelPrecisionBits: u32,
+    pub mipmapPrecisionBits: u32,
+    pub maxDrawIndexedIndexValue: u32,
+    pub maxDrawIndirectCount: u32,
+    pub maxSamplerLodBias: f32,
+    pub maxSamplerAnisotropy: f32,
+    pub maxViewports: u32,
+    pub maxViewportDimensions: [u32; 2],
+    pub viewportBoundsRange: [f32; 2],
+    pub viewportSubPixelBits: u32,
+    pub minMemoryMapAlignment: usize,
+    pub minTexelBufferOffsetAlignment: VkDeviceSize,
+    pub minUniformBufferOffsetAlignment: VkDeviceSize,
+    pub minStorageBufferOffsetAlignment: VkDeviceSize,
+    pub minTexelOffset: i32,
+    pub maxTexelOffset: u32,
+    pub minTexelGatherOffset: i32,
+    pub maxTexelGatherOffset: u32,
+    pub minInterpolationOffset: f32,
+    pub maxInterpolationOffset: f32,
+    pub subPixelInterpolationOffsetBits: u32,
+    pub maxFramebufferWidth: u32,
+    pub maxFramebufferHeight: u32,
+    pub maxFramebufferLayers: u32,
+    pub framebufferColorSampleCounts: VkFlags,
+    pub framebufferDepthSampleCounts: VkFlags,
+    pub framebufferStencilSampleCounts: VkFlags,
+    pub framebufferNoAttachmentsSampleCounts: VkFlags,
+    pub maxColorAttachments: u32,
+    pub sampledImageColorSampleCounts: VkFlags,
+    pub sampledImageIntegerSampleCounts: VkFlags,
+    pub sampledImageDepthSampleCounts: VkFlags,
+    pub sampledImageStencilSampleCounts: VkFlags,
+    pub storageImageSampleCounts: VkFlags,
+    pub maxSampleMaskWords: u32,
+    pub timestampComputeAndGraphics: VkBool32,
+    pub timestampPeriod: f32,
+    pub maxClipDistances: u32,
+    pub maxCullDistances: u32,
+    pub maxCombinedClipAndCullDistances: u32,
+    pub discreteQueuePriorities: u32,
+    pub pointSizeRange: [f32; 2],
+    pub lineWidthRange: [f32; 2],
+    pub pointSizeGranularity: f32,
+    pub lineWidthGranularity: f32,
+    pub strictLines: VkBool32,
+    pub standardSampleLocations: VkBool32,
+    pub optimalBufferCopyOffsetAlignment: VkDeviceSize,
+    pub optimalBufferCopyRowPitchAlignment: VkDeviceSize,
+    pub nonCoherentAtomSize: VkDeviceSize,
+}
+
+#[repr(C)]
+pub struct VkPhysicalDeviceSparseProperties {
+    pub residencyStandard2DBlockShape: VkBool32,
+    pub residencyStandard2DMultisampleBlockShape: VkBool32,
+    pub residencyStandard3DBlockShape: VkBool32,
+    pub residencyAlignedMipSize: VkBool32,
+    pub residencyNonResidentStrict: VkBool32,
+}
+
+pub const VK_MAX_PHYSICAL_DEVICE_NAME_SIZE: usize = 256;
+pub const VK_UUID_SIZE: usize = 16;
+
+#[repr(C)]
+pub struct VkPhysicalDeviceProperties {
+    pub apiVersion: u32,
+    pub driverVersion: u32,
+    pub vendorID: u32,
+    pub deviceID: u32,
+    pub deviceType: c_int,
+    pub deviceName: [c_char; VK_MAX_PHYSICAL_DEVICE_NAME_SIZE],
+    pub pipelineCacheUUID: [u8; VK_UUID_SIZE],
+    pub limits: VkPhysicalDeviceLimits,
+    pub sparseProperties: VkPhysicalDeviceSparseProperties,
+}
+
+unsafe extern "C" {
+    pub fn vkGetPhysicalDeviceProperties(
+        physicalDevice: VkPhysicalDevice,
+        pProperties: *mut VkPhysicalDeviceProperties,
+    );
+    pub fn vkCreateQueryPool(
+        device: VkDevice,
+        pCreateInfo: *const VkQueryPoolCreateInfo,
+        pAllocator: *const c_void,
+        pQueryPool: *mut VkQueryPool,
+    ) -> VkResult;
+    pub fn vkDestroyQueryPool(device: VkDevice, queryPool: VkQueryPool, pAllocator: *const c_void);
+    pub fn vkCmdResetQueryPool(
+        commandBuffer: VkCommandBuffer,
+        queryPool: VkQueryPool,
+        firstQuery: u32,
+        queryCount: u32,
+    );
+    pub fn vkCmdWriteTimestamp(
+        commandBuffer: VkCommandBuffer,
+        pipelineStage: u32,
+        queryPool: VkQueryPool,
+        query: u32,
+    );
+    pub fn vkGetQueryPoolResults(
+        device: VkDevice,
+        queryPool: VkQueryPool,
+        firstQuery: u32,
+        queryCount: u32,
+        dataSize: usize,
+        pData: *mut c_void,
+        stride: VkDeviceSize,
+        flags: VkFlags,
+    ) -> VkResult;
+}

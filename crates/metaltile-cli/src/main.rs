@@ -303,7 +303,13 @@ impl FilterSpec {
     }
 
     /// Name-only match (used for snap/diff which have no file info).
-    pub fn matches_name(&self, name: &str) -> bool {
+    pub fn matches_name(&self, name: &str) -> bool { self.matches_result(name, "") }
+
+    /// Match a bench result by name + its kernel family (e.g. `ffai`/`mlx`).
+    /// Group predicates accept either the family or the name-derived op
+    /// group, so `--match-group ffai` selects the CI shard family while
+    /// `--match-group softmax` still selects an individual op.
+    pub fn matches_result(&self, name: &str, family: &str) -> bool {
         if let Some(f) = &self.filter
             && !name.to_ascii_lowercase().contains(&f.to_ascii_lowercase())
         {
@@ -319,14 +325,15 @@ impl FilterSpec {
         {
             return false;
         }
-        let group = extract_op_group(name);
+        let group = metaltile_core::protocol::op_group(name);
         if let Some(re) = &self.match_group
             && !re.is_match(group)
+            && !(!family.is_empty() && re.is_match(family))
         {
             return false;
         }
         if let Some(re) = &self.no_match_group
-            && re.is_match(group)
+            && (re.is_match(group) || (!family.is_empty() && re.is_match(family)))
         {
             return false;
         }
@@ -362,21 +369,6 @@ impl FilterSpec {
     }
 }
 
-/// Extract the op group from a kernel name:
-/// - `"ffai/gemv"` → `"ffai"`
-/// - `"mt_softmax_f32"` → `"softmax"` (strips `mt_` prefix and dtype suffix)
-/// - `"softmax"` → `"softmax"`
-fn extract_op_group(name: &str) -> &str {
-    if let Some(pos) = name.find('/') {
-        return &name[..pos];
-    }
-    let name = name.strip_prefix("mt_").unwrap_or(name);
-    name.strip_suffix("_f32")
-        .or_else(|| name.strip_suffix("_f16"))
-        .or_else(|| name.strip_suffix("_bf16"))
-        .unwrap_or(name)
-}
-
 // ── Bench ────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args, Debug)]
@@ -391,6 +383,12 @@ struct BenchArgs {
 
     #[command(flatten)]
     filter_args: FilterArgs,
+
+    /// GPU backend to bench on. The runner binary must be built with the
+    /// matching cargo feature (`--features cuda|hip|vulkan`); `metal` is the
+    /// macOS default and needs no feature.
+    #[arg(long, value_name = "BACKEND", help_heading = "Bench options")]
+    backend: Option<BackendChoice>,
 
     /// Override the number of timed iterations (default: from tile.toml or 3).
     #[arg(long, value_name = "N", help_heading = "Bench options")]
@@ -462,8 +460,38 @@ struct TestArgs {
     #[arg(long, requires = "summary", help_heading = "Display options")]
     detailed: bool,
 
+    /// GPU backend to test on. The runner binary must be built with the
+    /// matching cargo feature (`--features cuda|hip|vulkan`); `metal` is the
+    /// macOS default and needs no feature.
+    #[arg(long, value_name = "BACKEND", help_heading = "Test options")]
+    backend: Option<BackendChoice>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
+}
+
+/// GPU backend selector shared by `tile bench` / `tile test`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BackendChoice {
+    /// Apple Metal (macOS default).
+    Metal,
+    /// NVIDIA CUDA (NVRTC + Driver API).
+    Cuda,
+    /// AMD ROCm / HIP (hipRTC + HIP runtime).
+    Hip,
+    /// Vulkan / SPIR-V compute.
+    Vulkan,
+}
+
+impl BackendChoice {
+    fn as_runner_arg(self) -> &'static str {
+        match self {
+            BackendChoice::Metal => "metal",
+            BackendChoice::Cuda => "cuda",
+            BackendChoice::Hip => "hip",
+            BackendChoice::Vulkan => "vulkan",
+        }
+    }
 }
 
 // ── Build ────────────────────────────────────────────────────────────────

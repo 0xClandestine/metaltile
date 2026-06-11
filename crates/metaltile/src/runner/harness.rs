@@ -40,6 +40,25 @@ pub struct RunnerHarness;
 impl RunnerHarness {
     /// Run the full harness.  Returns `true` if every item passed / compiled.
     pub fn run(args: &RunnerArgs) -> bool {
+        // `--backend cuda|hip|vulkan` routes bench/test through the device
+        // runtimes instead of the Metal GpuRunner/Context.
+        if let Some(backend) = crate::runner::backend::requested(args) {
+            return match args.command {
+                RunnerCommand::Bench => crate::runner::backend::run_bench(args, backend),
+                RunnerCommand::Test => crate::runner::backend::run_test(args, backend),
+                RunnerCommand::Build | RunnerCommand::Inspect => {
+                    emit_stdout(&ProtocolMessage::ProtocolError {
+                        name: "backend".into(),
+                        dtype: "".into(),
+                        message: format!(
+                            "--backend {backend} applies to bench/test only — build and \
+                             inspect always emit MSL"
+                        ),
+                    });
+                    false
+                },
+            };
+        }
         match args.command {
             RunnerCommand::Bench => Self::run_bench(args),
             RunnerCommand::Test => Self::run_test(args),
@@ -54,12 +73,47 @@ impl RunnerHarness {
         let warmup = args.warmup.unwrap_or(BENCH_WARMUP);
         let iters = args.iters.unwrap_or(BENCH_ITERS);
 
-        let entries: Vec<_> = all_benches()
-            .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
-            .collect();
+        let name_filter = match NameFilter::from_args(args) {
+            Ok(f) => f,
+            Err(msg) => {
+                emit_stdout(&ProtocolMessage::ProtocolError {
+                    name: "filter".into(),
+                    dtype: "".into(),
+                    message: msg,
+                });
+                return false;
+            },
+        };
 
-        let dtypes = Self::dtype_list(args);
-        let total = (entries.len() * dtypes.len()) as u32;
+        let dtype_restrict = Self::dtype_list(args);
+
+        // Worklist of (bench, dtype, family) tuples over each bench's
+        // *declared* dtypes (∩ the --dtype restriction) — matching the build
+        // path. A u32-only bench must run at u32, not the float default list.
+        let mut work: Vec<(&'static dyn KernelBench, DType, &'static str)> = Vec::new();
+        for entry in all_benches() {
+            let bench = entry.bench();
+            let family = kernel_family(entry.file());
+            for &dt in bench.dtypes() {
+                if dtype_restrict.as_ref().is_none_or(|ds| ds.contains(&dt)) {
+                    work.push((bench, dt, family));
+                }
+            }
+        }
+
+        // Name/group filters match the registered kernel name (dtype-suffixed,
+        // as printed) — not the `#[bench]` setup-fn ident, which is frequently
+        // just `bench_<something>` and collapses across kernels. Resolving the
+        // kernel name requires running the setup fn, so only do this pre-pass
+        // when a filter is actually set.
+        if !name_filter.is_empty() {
+            work.retain(|&(bench, dt, family)| {
+                let name = bench_display_name(bench, dt);
+                name_filter.matches(&name, bench.name(), family)
+            });
+        }
+
+        let total = work.len() as u32;
 
         let runner = match GpuRunner::new() {
             Ok(r) => r,
@@ -97,24 +151,21 @@ impl RunnerHarness {
         let mut passed = 0u32;
         let mut failed = 0u32;
 
-        for entry in entries {
-            let bench = entry.bench();
-            for &dt in &dtypes {
-                if let Some(result) = run_one_bench(&runner, bench, dt, warmup, iters) {
-                    if result.correct {
-                        passed += 1;
-                    } else {
-                        failed += 1;
-                    }
-                    emit_stdout(&ProtocolMessage::BenchResult(result));
+        for (bench, dt, family) in work {
+            if let Some(result) = run_one_bench(&runner, bench, dt, family, warmup, iters) {
+                if result.correct {
+                    passed += 1;
                 } else {
                     failed += 1;
-                    emit_stdout(&ProtocolMessage::ProtocolError {
-                        name: entry.bench().name().into(),
-                        dtype: format!("{dt:?}").to_lowercase(),
-                        message: "bench failed (compile error or GPU unavailable)".into(),
-                    });
                 }
+                emit_stdout(&ProtocolMessage::BenchResult(result));
+            } else {
+                failed += 1;
+                emit_stdout(&ProtocolMessage::ProtocolError {
+                    name: bench.name().into(),
+                    dtype: format!("{dt:?}").to_lowercase(),
+                    message: "bench failed (compile error or GPU unavailable)".into(),
+                });
             }
         }
 
@@ -134,14 +185,29 @@ impl RunnerHarness {
     fn run_test(args: &RunnerArgs) -> bool {
         use rayon::prelude::*;
 
+        let name_filter = match NameFilter::from_args(args) {
+            Ok(f) => f,
+            Err(msg) => {
+                emit_stdout(&ProtocolMessage::ProtocolError {
+                    name: "filter".into(),
+                    dtype: "".into(),
+                    message: msg,
+                });
+                return false;
+            },
+        };
+
         let entries: Vec<_> = all_tests()
-            .filter(|e| args.filter.as_deref().is_none_or(|f| e.test().name().contains(f)))
+            .filter(|e| {
+                name_filter.matches(e.test().name(), e.test().name(), kernel_family(e.file()))
+            })
             .collect();
 
         let dtypes = Self::dtype_list(args);
+        let allowed = |dt: &DType| dtypes.as_ref().is_none_or(|ds| ds.contains(dt));
         let total: u32 = entries
             .iter()
-            .map(|e| e.test().dtypes().iter().filter(|dt| dtypes.contains(dt)).count() as u32)
+            .map(|e| e.test().dtypes().iter().filter(|dt| allowed(dt)).count() as u32)
             .sum();
 
         emit_stdout(&ProtocolMessage::Start {
@@ -182,7 +248,7 @@ impl RunnerHarness {
                 let test = entry.test();
                 test.dtypes()
                     .iter()
-                    .filter(|dt| dtypes.contains(dt))
+                    .filter(|dt| dtypes.as_ref().is_none_or(|ds| ds.contains(*dt)))
                     .map(|&dt| {
                         let setup = test.setup(dt);
                         let tol = test.tolerance(dt);
@@ -303,16 +369,31 @@ impl RunnerHarness {
         // threadgroup geometry — everything emission needs.  Keyed by the
         // kernel's generic name; multiple benches for the same kernel union
         // their dtype sets.
+        let name_filter = match NameFilter::from_args(args) {
+            Ok(f) => f,
+            Err(msg) => {
+                emit_stdout(&ProtocolMessage::ProtocolError {
+                    name: "filter".into(),
+                    dtype: "".into(),
+                    message: msg,
+                });
+                return false;
+            },
+        };
+
         let mut kernel_map: std::collections::BTreeMap<
             String,
             (&'static dyn KernelBench, Vec<DType>),
         > = std::collections::BTreeMap::new();
-        for entry in all_benches()
-            .filter(|e| args.filter.as_deref().is_none_or(|f| e.bench().name().contains(f)))
-        {
+        for entry in all_benches() {
             let bench = entry.bench();
             let Some(&first_dt) = bench.dtypes().first() else { continue };
+            // Filter on the registered kernel name (what gets emitted), with
+            // the bench setup-fn ident as a substring fallback.
             let base_name = bench.setup(first_dt).kernel().name.to_string();
+            if !name_filter.matches(&base_name, bench.name(), kernel_family(entry.file())) {
+                continue;
+            }
             let e = kernel_map.entry(base_name).or_insert((bench, Vec::new()));
             for &dt in bench.dtypes() {
                 if !e.1.contains(&dt) {
@@ -712,15 +793,15 @@ impl RunnerHarness {
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
-    fn dtype_list(args: &RunnerArgs) -> Vec<DType> {
-        if let Some(s) = &args.dtype {
-            parse_dtype(s).map(|d| vec![d]).unwrap_or_else(|| {
-                eprintln!("unknown dtype '{s}'; using f32");
-                vec![DType::F32]
-            })
-        } else {
-            vec![DType::F32, DType::F16, DType::BF16]
-        }
+    /// `--dtype` restriction. `None` = no restriction — every item runs at
+    /// its *declared* dtypes (so u32/i32-only entries aren't silently
+    /// skipped or, worse, run at float dtypes they never declared).
+    pub(crate) fn dtype_list(args: &RunnerArgs) -> Option<Vec<DType>> {
+        let s = args.dtype.as_ref()?;
+        parse_dtype(s).map(|d| vec![d]).or_else(|| {
+            eprintln!("unknown dtype '{s}'; using f32");
+            Some(vec![DType::F32])
+        })
     }
 }
 
@@ -776,16 +857,23 @@ fn run_one_bench(
     runner: &GpuRunner,
     bench: &'static dyn KernelBench,
     dt: DType,
+    family: &str,
     warmup: usize,
     iters: usize,
 ) -> Option<BenchResult> {
     let setup: BenchSetup = bench.setup(dt);
     let bytes_moved = bench.bytes_moved(&setup);
     let kernel = setup.kernel();
-    let name = bench.name().to_string();
+    // Report the registered kernel name (dtype-suffixed, mirroring the build
+    // path's emitted names) — NOT the `#[bench]` setup-fn ident, which is
+    // often just `bench`/`bench_<op>` and collapses across kernels (#279).
+    let name = suffixed_kernel_name(&kernel.name, dt);
     let dtype_str = format!("{dt:?}").to_lowercase();
 
-    let msl = MslGenerator::default().generate(kernel).ok()?;
+    // Mode-aware generator, same as the build path — `MslGenerator::default()`
+    // emits broken MSL for NAX/MPP cooperative kernels.
+    let generator = generator_for_mode(kernel.mode, Some(setup.grid().tpg[0]));
+    let msl = generator.generate(kernel).ok()?;
     let compiled = runner.compile(&msl, &kernel.name).ok()?;
 
     // Build positional GPU buffers: tensor params → constexprs.
@@ -861,6 +949,8 @@ fn run_one_bench(
             (None, None, true)
         };
 
+    // Fallback shape from the largest buffer. The dtype is NOT folded in —
+    // it's already its own column (and the name's suffix) at the printer.
     let shape = setup.shape_label().map(|s| s.to_string()).unwrap_or_else(|| {
         let n = setup.buffers().iter().map(|b| b.len()).max().unwrap_or(0);
         let suffix = if n >= 1 << 20 && n % (1 << 20) == 0 {
@@ -870,11 +960,12 @@ fn run_one_bench(
         } else {
             n.to_string()
         };
-        format!("N={suffix} {dtype_str}")
+        format!("N={suffix}")
     });
 
     Some(BenchResult {
         name,
+        group: family.to_string(),
         dtype: dtype_str,
         shape,
         mt_gbps,
@@ -1118,7 +1209,7 @@ pub fn run_kernel_test(
     Ok(TestOutcome { passed: (worst as f64) <= tol, max_abs_err: worst, n_checked })
 }
 
-fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
+pub(crate) fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
         DType::F32 => bytes
             .chunks_exact(4)
@@ -1165,5 +1256,222 @@ fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
         DType::I8 => bytes.iter().take(n).map(|&b| b as i8 as f32).collect(),
         DType::U8 => bytes.iter().take(n).map(|&b| b as f32).collect(),
         _ => vec![0.0; n],
+    }
+}
+
+// ── Name filtering (#279) ─────────────────────────────────────────────────
+
+/// The registered kernel name with the dtype suffix appended, mirroring the
+/// names the build path emits (`mt_exp` at f32 → `mt_exp_f32`). Names that
+/// already carry the suffix (single-dtype variants benches) pass through.
+pub(crate) fn suffixed_kernel_name(kernel_name: &str, dt: DType) -> String {
+    let suffix = codegen_emit::dtype_suffix(dt);
+    if kernel_name.ends_with(&format!("_{suffix}")) {
+        kernel_name.to_string()
+    } else {
+        format!("{kernel_name}_{suffix}")
+    }
+}
+
+/// Resolve a bench's display name for one dtype. Runs the setup fn (the
+/// kernel IR only exists inside it), so callers should reach for this in
+/// filter pre-passes only — not on the unfiltered hot path.
+pub(crate) fn bench_display_name(bench: &'static dyn KernelBench, dt: DType) -> String {
+    suffixed_kernel_name(&bench.setup(dt).kernel().name, dt)
+}
+
+/// Runner-side mirror of the CLI's name/group filter flags. The CLI forwards
+/// `--filter` / `--match-name` / `--no-match-name` / `--match-group` /
+/// `--no-match-group` so filtering happens *before* GPU work — previously
+/// only `--filter` crossed the subprocess boundary and a `--match-name` run
+/// benched the full corpus while printing nothing (#279).
+pub(crate) struct NameFilter {
+    filter: Option<String>,
+    match_name: Option<regex::Regex>,
+    no_match_name: Option<regex::Regex>,
+    match_group: Option<regex::Regex>,
+    no_match_group: Option<regex::Regex>,
+}
+
+impl NameFilter {
+    pub(crate) fn from_args(args: &RunnerArgs) -> Result<Self, String> {
+        fn re(s: Option<&str>, flag: &str) -> Result<Option<regex::Regex>, String> {
+            s.map(|p| {
+                regex::Regex::new(&format!("(?i){p}"))
+                    .map_err(|e| format!("invalid regex for {flag}: {e}"))
+            })
+            .transpose()
+        }
+        Ok(NameFilter {
+            filter: args.filter.clone(),
+            match_name: re(args.match_name.as_deref(), "--match-name")?,
+            no_match_name: re(args.no_match_name.as_deref(), "--no-match-name")?,
+            match_group: re(args.match_group.as_deref(), "--match-group")?,
+            no_match_group: re(args.no_match_group.as_deref(), "--no-match-group")?,
+        })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.filter.is_none()
+            && self.match_name.is_none()
+            && self.no_match_name.is_none()
+            && self.match_group.is_none()
+            && self.no_match_group.is_none()
+    }
+
+    /// AND semantics across all set predicates, matching the CLI's
+    /// `FilterSpec`. `fallback_name` keeps the legacy behaviour where the
+    /// `--filter` substring also matched the `#[bench]`/`#[test_kernel]`
+    /// fn ident. Group predicates accept either `family` (the source dir
+    /// below `src/` — what the CI shards select with `--match-group
+    /// 'ffai'|'mlx'`) or the name-derived op group (`--match-group softmax`).
+    pub(crate) fn matches(&self, name: &str, fallback_name: &str, family: &str) -> bool {
+        if let Some(f) = &self.filter {
+            let f = f.to_ascii_lowercase();
+            if !name.to_ascii_lowercase().contains(&f)
+                && !fallback_name.to_ascii_lowercase().contains(&f)
+            {
+                return false;
+            }
+        }
+        if let Some(re) = &self.match_name
+            && !re.is_match(name)
+        {
+            return false;
+        }
+        if let Some(re) = &self.no_match_name
+            && re.is_match(name)
+        {
+            return false;
+        }
+        let group = metaltile_core::protocol::op_group(name);
+        if let Some(re) = &self.match_group
+            && !re.is_match(group)
+            && !(!family.is_empty() && re.is_match(family))
+        {
+            return false;
+        }
+        if let Some(re) = &self.no_match_group
+            && (re.is_match(group) || (!family.is_empty() && re.is_match(family)))
+        {
+            return false;
+        }
+        true
+    }
+}
+
+/// Kernel family of a registration site — the directory component below
+/// `src/` in the `file!()` path (`crates/metaltile-std/src/mlx/copy.rs` →
+/// `"mlx"`). Empty when the layout doesn't follow the family convention.
+pub(crate) fn kernel_family(file: &str) -> &str {
+    let Some(pos) = file.find("/src/") else { return "" };
+    let rest = &file[pos + "/src/".len()..];
+    match rest.find('/') {
+        Some(end) => &rest[..end],
+        None => "",
+    }
+}
+
+#[cfg(test)]
+mod name_filter_tests {
+    use super::*;
+
+    fn args_with(f: impl FnOnce(&mut RunnerArgs)) -> RunnerArgs {
+        let mut a = RunnerArgs::parse(vec!["bench".into()]).unwrap();
+        f(&mut a);
+        a
+    }
+
+    #[test]
+    fn suffixed_name_appends_dtype() {
+        assert_eq!(suffixed_kernel_name("mt_exp", DType::F32), "mt_exp_f32");
+        assert_eq!(
+            suffixed_kernel_name("dequant_gather_int4", DType::F16),
+            "dequant_gather_int4_f16"
+        );
+    }
+
+    #[test]
+    fn suffixed_name_passes_through_when_already_suffixed() {
+        assert_eq!(suffixed_kernel_name("mt_exp_f32", DType::F32), "mt_exp_f32");
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        let nf = NameFilter::from_args(&args_with(|_| {})).unwrap();
+        assert!(nf.is_empty());
+        assert!(nf.matches("mt_exp_f32", "bench", ""));
+    }
+
+    #[test]
+    fn match_name_is_case_insensitive_regex() {
+        let nf = NameFilter::from_args(&args_with(|a| {
+            a.match_name = Some("DEQUANT_.*_INT4".into());
+        }))
+        .unwrap();
+        assert!(nf.matches("dequant_gather_int4_f32", "bench", ""));
+        assert!(!nf.matches("mt_exp_f32", "bench", ""));
+    }
+
+    #[test]
+    fn no_match_name_excludes() {
+        let nf = NameFilter::from_args(&args_with(|a| {
+            a.no_match_name = Some("_bf16$".into());
+        }))
+        .unwrap();
+        assert!(nf.matches("mt_exp_f32", "bench", ""));
+        assert!(!nf.matches("mt_exp_bf16", "bench", ""));
+    }
+
+    #[test]
+    fn filter_substring_matches_kernel_or_bench_fn_name() {
+        let nf = NameFilter::from_args(&args_with(|a| {
+            a.filter = Some("vector_add".into());
+        }))
+        .unwrap();
+        // kernel name hit
+        assert!(nf.matches("ffai_vector_add_f32", "bench_add", ""));
+        // legacy bench-fn-ident hit
+        assert!(nf.matches("some_other_kernel_f32", "bench_vector_add", ""));
+        assert!(!nf.matches("mt_exp_f32", "bench_exp", ""));
+    }
+
+    #[test]
+    fn group_filters_strip_prefix_and_dtype_suffix() {
+        let nf = NameFilter::from_args(&args_with(|a| {
+            a.match_group = Some("^softmax$".into());
+        }))
+        .unwrap();
+        assert!(nf.matches("mt_softmax_f32", "bench", ""));
+        assert!(!nf.matches("mt_softplus_f32", "bench", ""));
+    }
+
+    #[test]
+    fn group_filter_also_matches_kernel_family() {
+        // The CI bench shards select whole families this way:
+        // `tile bench --match-group 'ffai'` / `--match-group 'mlx'`.
+        let nf = NameFilter::from_args(&args_with(|a| {
+            a.match_group = Some("mlx".into());
+        }))
+        .unwrap();
+        assert!(nf.matches("mt_copy_f32", "bench", "mlx"));
+        assert!(!nf.matches("mt_copy_f32", "bench", "ffai"));
+    }
+
+    #[test]
+    fn kernel_family_from_registration_file() {
+        assert_eq!(kernel_family("crates/metaltile-std/src/mlx/copy.rs"), "mlx");
+        assert_eq!(kernel_family("crates/metaltile-std/src/ffai/sdpa_multi.rs"), "ffai");
+        // Top-level files and non-src paths have no family.
+        assert_eq!(kernel_family("crates/metaltile-std/src/utils.rs"), "");
+        assert_eq!(kernel_family("examples/foo.rs"), "");
+    }
+
+    #[test]
+    fn invalid_regex_is_an_error_not_a_panic() {
+        let r = NameFilter::from_args(&args_with(|a| {
+            a.match_name = Some("(".into());
+        }));
+        assert!(r.is_err());
     }
 }

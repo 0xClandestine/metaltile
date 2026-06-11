@@ -761,91 +761,16 @@ impl VulkanDevice {
             }
         }
 
-        // 4. Build push-constant payload (constexprs in order, then `_n_elems`),
-        //    padding each member to its scalar-layout alignment so host
-        //    offsets match the GLSL `scalar` push-constant block (a tight
-        //    stream drifts as soon as a sub-4-byte constexpr precedes a
-        //    wider one).
-        let mut push: Vec<u8> = Vec::with_capacity(plan.push_constant_bytes as usize);
-        for ce in &kernel.constexprs {
-            let name = ce.name.name();
-            let bytes = buffers
-                .get(name)
-                .ok_or_else(|| MetalTileError::Dispatch(format!("missing constexpr '{name}'")))?;
-            let align = bytes.len().max(1);
-            while !push.len().is_multiple_of(align) {
-                push.push(0);
-            }
-            push.extend_from_slice(bytes);
-        }
-        if plan.has_n_elems {
-            let n_elems = kernel
-                .params
-                .iter()
-                .position(|p| p.is_output)
-                .and_then(|i| {
-                    let p = &kernel.params[i];
-                    buffers.get(&p.name).map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
-                })
-                .unwrap_or(0);
-            while !push.len().is_multiple_of(4) {
-                push.push(0);
-            }
-            push.extend_from_slice(&n_elems.to_le_bytes());
-        }
-        // vkCmdPushConstants requires size % 4 == 0.
-        while !push.len().is_multiple_of(4) {
-            push.push(0);
-        }
+        // 4. Push-constant payload (shared builder).
+        let push = Self::build_push_constants(kernel, buffers, &plan)?;
 
         // 5. Allocate descriptor set + update with our buffers.
-        let descriptor_set = unsafe {
-            let ai = VkDescriptorSetAllocateInfo {
-                sType: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                pNext: ptr::null(),
-                descriptorPool: self.descriptor_pool,
-                descriptorSetCount: 1,
-                pSetLayouts: &pipeline.set_layout,
-            };
-            let mut ds: VkDescriptorSet = VK_NULL_HANDLE;
-            vk_check(
-                vkAllocateDescriptorSets(self.device, &ai, &mut ds),
-                "vkAllocateDescriptorSets",
-            )?;
-            ds
-        };
-        // `buf_infos` MUST outlive the `vkUpdateDescriptorSets` call (it
-        // references our slice). Hold it for the whole unsafe block.
+        // 5. Descriptor set pointing at our buffers (shared helper).
         let buf_infos: Vec<VkDescriptorBufferInfo> = dev_bufs
             .iter()
             .map(|b| VkDescriptorBufferInfo { buffer: b.buffer, offset: 0, range: b.size })
             .collect();
-        let writes: Vec<VkWriteDescriptorSet> = plan
-            .bindings
-            .iter()
-            .enumerate()
-            .map(|(i, b)| VkWriteDescriptorSet {
-                sType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                pNext: ptr::null(),
-                dstSet: descriptor_set,
-                dstBinding: b.binding,
-                dstArrayElement: 0,
-                descriptorCount: 1,
-                descriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                pImageInfo: ptr::null(),
-                pBufferInfo: &buf_infos[i],
-                pTexelBufferView: ptr::null(),
-            })
-            .collect();
-        unsafe {
-            vkUpdateDescriptorSets(
-                self.device,
-                writes.len() as u32,
-                writes.as_ptr(),
-                0,
-                ptr::null(),
-            );
-        }
+        let descriptor_set = self.write_descriptor_set(&pipeline, &plan, &buf_infos)?;
 
         // 6. Build + submit a command buffer: bind pipeline, push consts,
         //    dispatch, wait.
@@ -968,8 +893,362 @@ impl VulkanDevice {
         Ok(out)
     }
 
-    // Device-name query intentionally omitted (would need the extra
-    // PhysicalDeviceProperties FFI).
+    /// Push-constant payload for one dispatch: constexprs in declaration
+    /// order, each padded to its scalar-layout alignment so host offsets
+    /// match the GLSL `scalar` push-constant block (a tight stream drifts
+    /// as soon as a sub-4-byte constexpr precedes a wider one), then
+    /// `_n_elems`, then padding to the 4-byte granularity
+    /// `vkCmdPushConstants` requires. Shared by `run_kernel` and
+    /// `bench_kernel`.
+    fn build_push_constants(
+        kernel: &Kernel,
+        buffers: &BTreeMap<String, Vec<u8>>,
+        plan: &GlslBindingPlan,
+    ) -> Result<Vec<u8>, MetalTileError> {
+        let mut push: Vec<u8> = Vec::with_capacity(plan.push_constant_bytes as usize);
+        for ce in &kernel.constexprs {
+            let name = ce.name.name();
+            let bytes = buffers
+                .get(name)
+                .ok_or_else(|| MetalTileError::Dispatch(format!("missing constexpr '{name}'")))?;
+            let align = bytes.len().max(1);
+            while !push.len().is_multiple_of(align) {
+                push.push(0);
+            }
+            push.extend_from_slice(bytes);
+        }
+        if plan.has_n_elems {
+            let n_elems = kernel
+                .params
+                .iter()
+                .position(|p| p.is_output)
+                .and_then(|i| {
+                    let p = &kernel.params[i];
+                    buffers.get(&p.name).map(|b| (b.len() / p.dtype.size_bytes().max(1)) as u32)
+                })
+                .unwrap_or(0);
+            while !push.len().is_multiple_of(4) {
+                push.push(0);
+            }
+            push.extend_from_slice(&n_elems.to_le_bytes());
+        }
+        while !push.len().is_multiple_of(4) {
+            push.push(0);
+        }
+        Ok(push)
+    }
+
+    /// Allocate a descriptor set from the shared pool and point every
+    /// binding in `plan` at the corresponding entry of `buf_infos` (which
+    /// must outlive this call — it is referenced by the write structs).
+    /// Shared by `run_kernel` and `bench_kernel`; the caller must hold
+    /// `exec_lock` (the descriptor pool is externally synchronized).
+    fn write_descriptor_set(
+        &self,
+        pipeline: &VulkanPipeline,
+        plan: &GlslBindingPlan,
+        buf_infos: &[VkDescriptorBufferInfo],
+    ) -> Result<VkDescriptorSet, MetalTileError> {
+        let descriptor_set = unsafe {
+            let ai = VkDescriptorSetAllocateInfo {
+                sType: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                pNext: ptr::null(),
+                descriptorPool: self.descriptor_pool,
+                descriptorSetCount: 1,
+                pSetLayouts: &pipeline.set_layout,
+            };
+            let mut ds: VkDescriptorSet = VK_NULL_HANDLE;
+            vk_check(
+                vkAllocateDescriptorSets(self.device, &ai, &mut ds),
+                "vkAllocateDescriptorSets",
+            )?;
+            ds
+        };
+        let writes: Vec<VkWriteDescriptorSet> = plan
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(i, b)| VkWriteDescriptorSet {
+                sType: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                pNext: ptr::null(),
+                dstSet: descriptor_set,
+                dstBinding: b.binding,
+                dstArrayElement: 0,
+                descriptorCount: 1,
+                descriptorType: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                pImageInfo: ptr::null(),
+                pBufferInfo: &buf_infos[i],
+                pTexelBufferView: ptr::null(),
+            })
+            .collect();
+        unsafe {
+            vkUpdateDescriptorSets(
+                self.device,
+                writes.len() as u32,
+                writes.as_ptr(),
+                0,
+                ptr::null(),
+            );
+        }
+        Ok(descriptor_set)
+    }
+
+    /// Physical-device name from the driver (e.g. `"AMD Radeon RX 9070 XT"`),
+    /// the analog of `HipDevice::name`.
+    pub fn device_label(&self) -> String {
+        let props = self.physical_device_properties();
+        let bytes: Vec<u8> =
+            props.deviceName.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn physical_device_properties(&self) -> VkPhysicalDeviceProperties {
+        unsafe {
+            let mut props = std::mem::MaybeUninit::<VkPhysicalDeviceProperties>::uninit();
+            vkGetPhysicalDeviceProperties(self.physical_device, props.as_mut_ptr());
+            props.assume_init()
+        }
+    }
+
+    /// Prepare once, dispatch `warmup + iters` times, and return per-dispatch
+    /// GPU times in µs from `vkCmdWriteTimestamp` pairs bracketing each
+    /// dispatch inside its command buffer (the CUDA/HIP `bench_kernel`
+    /// analog). Buffers upload once and stay resident across iterations; no
+    /// read-back — outputs are overwritten each iter, we only time.
+    pub fn bench_kernel(
+        &self,
+        kernel: &Kernel,
+        buffers: &BTreeMap<String, Vec<u8>>,
+        grid: [u32; 3],
+        block: [u32; 3],
+        warmup: u32,
+        iters: u32,
+    ) -> Result<Vec<f64>, MetalTileError> {
+        // ns per timestamp tick. 0 = device cannot timestamp.
+        let timestamp_period = self.physical_device_properties().limits.timestampPeriod;
+        if timestamp_period <= 0.0 {
+            return Err(MetalTileError::DeviceCapability(
+                "device reports timestampPeriod = 0 — no GPU timestamp support".into(),
+            ));
+        }
+
+        // Buffers go to DEVICE_LOCAL memory (staging copy), unlike
+        // `run_kernel`'s host-visible uploads — a bench must measure VRAM
+        // bandwidth, not the PCIe/GTT window the host-shadow path reads
+        // through (~16 GB/s vs ~550 GB/s on a discrete board). Allocation
+        // happens BEFORE the exec lock: `alloc_raw_device_local` takes the
+        // (non-reentrant) lock itself for its staging submit.
+        let mut dev_bufs: Vec<VulkanRawBuffer> = Vec::new();
+        let free_all = |bufs: &[VulkanRawBuffer]| {
+            for b in bufs {
+                self.free_raw(b);
+            }
+        };
+        for p in &kernel.params {
+            let Some(bytes) = buffers.get(&p.name) else {
+                free_all(&dev_bufs);
+                return Err(MetalTileError::Dispatch(format!(
+                    "missing buffer for param '{}'",
+                    p.name
+                )));
+            };
+            match self.alloc_raw_device_local(bytes) {
+                Ok(b) => dev_bufs.push(b),
+                Err(e) => {
+                    free_all(&dev_bufs);
+                    return Err(e);
+                },
+            }
+            if matches!(p.kind, metaltile_core::ir::ParamKind::Strided) {
+                for suffix in ["_shape", "_strides"] {
+                    let key = format!("{}{}", p.name, suffix);
+                    let meta = match buffers.get(&key) {
+                        Some(b) => b.clone(),
+                        None => synth_strided_meta(&p.shape, suffix == "_strides"),
+                    };
+                    match self.alloc_raw_device_local(&meta) {
+                        Ok(b) => dev_bufs.push(b),
+                        Err(e) => {
+                            free_all(&dev_bufs);
+                            return Err(e);
+                        },
+                    }
+                }
+            }
+        }
+
+        let _exec = self.exec_lock.lock();
+
+        // Codegen, pipeline, push constants, descriptor set — as `run_kernel`.
+        let cg = GlslGenerator::new().with_local_size_3d(block);
+        let prep = (|| {
+            let plan = cg.binding_plan(kernel).map_err(MetalTileError::Codegen)?;
+            let glsl = cg.generate(kernel).map_err(MetalTileError::Codegen)?;
+            let pipeline = self.compile(&glsl, &plan, &kernel.name)?;
+            Ok::<_, MetalTileError>((plan, pipeline))
+        })();
+        let (plan, pipeline) = match prep {
+            Ok(v) => v,
+            Err(e) => {
+                drop(_exec);
+                free_all(&dev_bufs);
+                return Err(e);
+            },
+        };
+
+        let push = Self::build_push_constants(kernel, buffers, &plan)?;
+
+        let buf_infos: Vec<VkDescriptorBufferInfo> = dev_bufs
+            .iter()
+            .map(|b| VkDescriptorBufferInfo { buffer: b.buffer, offset: 0, range: b.size })
+            .collect();
+        let descriptor_set = match self.write_descriptor_set(&pipeline, &plan, &buf_infos) {
+            Ok(ds) => ds,
+            Err(e) => {
+                drop(_exec);
+                free_all(&dev_bufs);
+                return Err(e);
+            },
+        };
+
+        // Two-query timestamp pool, reset + reused per dispatch.
+        let query_pool = unsafe {
+            let qi = VkQueryPoolCreateInfo {
+                sType: VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                pNext: ptr::null(),
+                flags: 0,
+                queryType: VK_QUERY_TYPE_TIMESTAMP,
+                queryCount: 2,
+                pipelineStatistics: 0,
+            };
+            let mut qp: VkQueryPool = VK_NULL_HANDLE;
+            vk_check(
+                vkCreateQueryPool(self.device, &qi, ptr::null(), &mut qp),
+                "vkCreateQueryPool",
+            )?;
+            qp
+        };
+
+        // One timed dispatch: record reset → timestamp(top) → dispatch →
+        // timestamp(bottom), submit, wait, read the two ticks.
+        let dispatch_once = |timed: bool| -> Result<f64, MetalTileError> {
+            unsafe {
+                let cb_ai = VkCommandBufferAllocateInfo {
+                    sType: VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                    pNext: ptr::null(),
+                    commandPool: self.command_pool,
+                    level: VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                    commandBufferCount: 1,
+                };
+                let mut cb: VkCommandBuffer = ptr::null_mut();
+                vk_check(
+                    vkAllocateCommandBuffers(self.device, &cb_ai, &mut cb),
+                    "vkAllocateCommandBuffers",
+                )?;
+                let begin = VkCommandBufferBeginInfo {
+                    sType: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                    pNext: ptr::null(),
+                    flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+                    pInheritanceInfo: ptr::null(),
+                };
+                vk_check(vkBeginCommandBuffer(cb, &begin), "vkBeginCommandBuffer(bench)")?;
+                vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                vkCmdBindDescriptorSets(
+                    cb,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                if !push.is_empty() {
+                    vkCmdPushConstants(
+                        cb,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        push.len() as u32,
+                        push.as_ptr() as *const c_void,
+                    );
+                }
+                if timed {
+                    vkCmdResetQueryPool(cb, query_pool, 0, 2);
+                    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+                }
+                vkCmdDispatch(cb, grid[0], grid[1], grid[2]);
+                if timed {
+                    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+                }
+                vk_check(vkEndCommandBuffer(cb), "vkEndCommandBuffer(bench)")?;
+
+                let submit = VkSubmitInfo {
+                    sType: VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    pNext: ptr::null(),
+                    waitSemaphoreCount: 0,
+                    pWaitSemaphores: ptr::null(),
+                    pWaitDstStageMask: ptr::null(),
+                    commandBufferCount: 1,
+                    pCommandBuffers: &cb,
+                    signalSemaphoreCount: 0,
+                    pSignalSemaphores: ptr::null(),
+                };
+                vk_check(
+                    vkQueueSubmit(self.queue, 1, &submit, VK_NULL_HANDLE),
+                    "vkQueueSubmit(bench)",
+                )?;
+                vk_check(vkQueueWaitIdle(self.queue), "vkQueueWaitIdle(bench)")?;
+                vkFreeCommandBuffers(self.device, self.command_pool, 1, &cb);
+
+                if !timed {
+                    return Ok(0.0);
+                }
+                let mut ticks = [0u64; 2];
+                vk_check(
+                    vkGetQueryPoolResults(
+                        self.device,
+                        query_pool,
+                        0,
+                        2,
+                        std::mem::size_of_val(&ticks),
+                        ticks.as_mut_ptr() as *mut c_void,
+                        std::mem::size_of::<u64>() as VkDeviceSize,
+                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+                    ),
+                    "vkGetQueryPoolResults",
+                )?;
+                // ticks × period(ns) → µs.
+                Ok(ticks[1].wrapping_sub(ticks[0]) as f64 * timestamp_period as f64 / 1_000.0)
+            }
+        };
+
+        let run = || -> Result<Vec<f64>, MetalTileError> {
+            for _ in 0..warmup {
+                dispatch_once(false)?;
+            }
+            let mut samples = Vec::with_capacity(iters as usize);
+            for _ in 0..iters {
+                samples.push(dispatch_once(true)?);
+            }
+            Ok(samples)
+        };
+        let res = run();
+
+        // Cleanup mirrors run_kernel step 8 (+ the query pool, + the raw
+        // device-local buffers, which carry no Drop).
+        unsafe {
+            vkDestroyQueryPool(self.device, query_pool, ptr::null());
+            vkDestroyPipeline(self.device, pipeline.pipeline, ptr::null());
+            vkDestroyPipelineLayout(self.device, pipeline.layout, ptr::null());
+            vkDestroyDescriptorSetLayout(self.device, pipeline.set_layout, ptr::null());
+            vkDestroyShaderModule(self.device, pipeline.shader_module, ptr::null());
+            vkResetDescriptorPool(self.device, self.descriptor_pool, 0);
+        }
+        drop(_exec);
+        free_all(&dev_bufs);
+        res
+    }
 
     // ──────────────────────────────────────────────────────────────────
     // Resident-buffer + cached-pipeline seam (mirrors CudaDevice::alloc_raw

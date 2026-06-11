@@ -78,10 +78,18 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
         return Err(crate::CliError::Other("uncommitted changes".into()));
     }
 
-    // Spawn __tile_runner bench and stream protocol results.
+    // Spawn __tile_runner bench and stream protocol results. Name/group
+    // filters are forwarded so the runner skips non-matching kernels
+    // *before* GPU work — keeping them CLI-side meant a `--match-name` run
+    // benched the entire corpus while printing nothing (#279).
     let inv = RunnerInvocation {
         command: "bench".into(),
         filter: filter_args.filter.clone(),
+        match_name: filter_args.match_name.clone(),
+        no_match_name: filter_args.no_match_name.clone(),
+        match_group: filter_args.match_group.clone(),
+        no_match_group: filter_args.no_match_group.clone(),
+        backend: args.backend.map(|b| b.as_runner_arg().to_string()),
         warmup_runs: Some(warmup_runs),
         runs: Some(runs),
         profile: verbose >= 1,
@@ -111,7 +119,7 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
             );
         },
         ProtocolMessage::BenchResult(br) => {
-            if spec.matches_name(&br.name) {
+            if spec.matches_result(&br.name, &br.group) {
                 matched_filter = true;
                 printer.print_bench_result(&br);
             }
@@ -478,6 +486,7 @@ mod tests {
     fn make_result(name: &str, dtype: &str, mt_gbps: f64, correct: bool) -> ProtoBenchResult {
         ProtoBenchResult {
             name: name.into(),
+            group: String::new(),
             dtype: dtype.into(),
             shape: format!("N=1M {dtype}"),
             mt_gbps,

@@ -105,7 +105,7 @@ pub use metaltile_runtime::{
     VulkanRawBuffer,
     compile_glsl_to_spv,
 };
-/// Runtime context, dispatch types, resident buffers, and top-level runtime error.
+/// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{
     Context,
     DispatchResult,
@@ -113,7 +113,7 @@ pub use metaltile_runtime::{
     MetalTileError,
     ResidentBuffer,
 };
-/// CUDA device runtime entry points (feature `cuda`).
+/// CUDA / NVIDIA device runtime entry points (feature `cuda`).
 #[cfg(feature = "cuda")]
 pub use metaltile_runtime::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};
 /// HIP / ROCm device runtime entry points (feature `hip`).
