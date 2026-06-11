@@ -18,9 +18,7 @@
 
 ---
 
-A Rust-embedded DSL for writing GPU kernels once and running them everywhere. Write tile-level algorithms in Rust with `#[kernel]`, and the same kernel source lowers to **four GPU backends** — Apple Metal (MSL), NVIDIA (CUDA), AMD (HIP/ROCm), and any Vulkan-class GPU (SPIR-V) — verified against, and frequently faster than, hand-tuned MLX.
-
-Write once, run on Apple, NVIDIA, AMD, and Vulkan-class GPUs — no per-backend kernel rewrite. metaltile is the kernel layer beneath an LLM inference engine that runs a 30B-parameter hybrid model (Mamba2 SSM + 128-expert MoE + GQA attention) resident-decode on a single Grace-Blackwell (GB10) box; the same kernels also run on Apple GPUs.
+A Rust-embedded DSL for writing GPU kernels once and running them everywhere. Write tile-level algorithms in Rust with `#[kernel]` and the same source lowers to **four backends** — Apple Metal (MSL), NVIDIA (CUDA), AMD (HIP/ROCm), and any Vulkan-class GPU (SPIR-V) — with no per-backend rewrite, verified against and frequently faster than hand-tuned MLX.
 
 ## Installation
 
@@ -34,53 +32,63 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 
 ## Getting Started
 
-**1. Write a kernel.** Annotate a generic Rust function with `#[kernel(bench(...))]` — MetalTile generates `f32`, `f16`, and `bfloat16` variants from a single definition, lowers them to each enabled GPU backend (MSL by default; CUDA / HIP / Vulkan opt-in), and registers it against its MLX reference:
-
-<table>
-<tr>
-<th>Rust DSL — what you write</th>
-<th>Metal Shading Language — what you get</th>
-</tr>
-<tr>
-<td>
+**1. Write a kernel.** One `#[kernel]` definition lowers to MSL, CUDA, HIP, and SPIR-V. `variants(...)` stamps out compile-time specialisations at macro-expansion time — each with its own name, signature, and inventory entry — multiplied by the three dtype variants (`f32` / `f16` / `bf16`) the macro generates automatically:
 
 ```rust
-#[kernel(
-    bench(
-        op    = "unary",
-        subop = "exp",
-        class = Unary,
-        input = Signed,
-        tol   = 1e-4,
-        mlx   = "v_Exp{tn}{tn}",
-        metal_file = "unary.metal",
-    )
-)]
-pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
-    let idx = program_id(0);
-    store(out[idx], exp(load(a[idx])));
-}
-```
-
-</td>
-<td>
-
-```cpp
-kernel void mt_exp(
-    const device float *a [[buffer(0)]],
-    device float *out [[buffer(1)]],
-    uint tid [[thread_position_in_grid]]
+// 1 function → 6 variants × 3 dtypes = 18 kernels, compiled for each backend.
+#[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+pub fn dequant_gather<T>(
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] group_size: u32,
 ) {
-    uint v_idx = tid;
-    auto v1 = a[v_idx];
-    auto v2 = exp(v1);
-    out[v_idx] = v2;
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
+    let token_id = load(indices[token]);
+
+    let groups_per_row = hidden / group_size;
+    let g = d / group_size;
+    let u32_per_row = hidden * BITS / 32u32;
+    let row_off = token_id * u32_per_row;
+
+    let bit_off = d * BITS;
+    let word_idx = bit_off / 32u32;
+    let bit_in_w = bit_off & 31u32;
+
+    let bits_in_w0 = 32u32 - bit_in_w;
+    let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+    let spill = BITS - lo_bits;
+
+    let w0 = load(weight[row_off + word_idx]);
+    let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+    let w1 = load(weight[row_off + w1_idx]);
+
+    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+    let q = lo | hi;
+
+    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
+    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
+    let w_real = q.cast::<f32>() * scale + bias;
+    store(out[idx], w_real.cast::<T>());
 }
 ```
 
-</td>
-</tr>
-</table>
+Generated for every enabled backend (MSL · CUDA · HIP · SPIR-V):
+
+| | `f32` | `f16` | `bf16` |
+|---|---|---|---|
+| **int2** | `dequant_gather_int2` | `dequant_gather_int2_f16` | `dequant_gather_int2_bf16` |
+| **int3** | `dequant_gather_int3` | `dequant_gather_int3_f16` | `dequant_gather_int3_bf16` |
+| **int4** | `dequant_gather_int4` | `dequant_gather_int4_f16` | `dequant_gather_int4_bf16` |
+| **int5** | `dequant_gather_int5` | `dequant_gather_int5_f16` | `dequant_gather_int5_bf16` |
+| **int6** | `dequant_gather_int6` | `dequant_gather_int6_f16` | `dequant_gather_int6_bf16` |
+| **int8** | `dequant_gather_int8` | `dequant_gather_int8_f16` | `dequant_gather_int8_bf16` |
 
 **2. Install the CLI and run.**
 
