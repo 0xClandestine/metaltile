@@ -191,10 +191,7 @@ impl VariantsSpec {
         // Build base zip rows.
         let mut rows: Vec<Vec<(String, VariantValue)>> = (0..zip_count)
             .map(|i| {
-                self.params
-                    .iter()
-                    .map(|(name, vals)| (name.clone(), vals[i].clone()))
-                    .collect()
+                self.params.iter().map(|(name, vals)| (name.clone(), vals[i].clone())).collect()
             })
             .collect();
 
@@ -377,10 +374,7 @@ fn parse_ident_list(input: ParseStream) -> syn::Result<Vec<String>> {
 /// Returns one `Vec<VariantValue>` per column (transposed from row form).
 /// Named labels in each column get stable integers via per-column `named_seen` maps
 /// (first-occurrence-wins, same as `parse_value_list`).
-fn parse_tuple_rows(
-    input: ParseStream,
-    col_count: usize,
-) -> syn::Result<Vec<Vec<VariantValue>>> {
+fn parse_tuple_rows(input: ParseStream, col_count: usize) -> syn::Result<Vec<Vec<VariantValue>>> {
     let bracket_content;
     syn::bracketed!(bracket_content in input);
 
@@ -456,10 +450,23 @@ fn parse_single_value(
 fn is_primitive_type(s: &str) -> bool {
     matches!(
         s,
-        "u8" | "u16" | "u32" | "u64" | "u128"
-            | "i8" | "i16" | "i32" | "i64" | "i128"
-            | "f32" | "f64" | "f16" | "bf16"
-            | "bool" | "char" | "usize" | "isize"
+        "u8" | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "f32"
+            | "f64"
+            | "f16"
+            | "bf16"
+            | "bool"
+            | "char"
+            | "usize"
+            | "isize"
     )
 }
 
@@ -1003,8 +1010,9 @@ pub(crate) fn eval_suffix(
         // the integer value; arithmetic expressions (`{FMT + 1}`) still fall
         // through to eval_expr where the integer value is used.
         let trimmed = expr_str.trim();
-        if let Some(val @ (VariantValue::Float(_) | VariantValue::Type(_) | VariantValue::Named { .. })) =
-            params.get(trimmed)
+        if let Some(
+            val @ (VariantValue::Float(_) | VariantValue::Type(_) | VariantValue::Named { .. }),
+        ) = params.get(trimmed)
         {
             result.push_str(&val.to_suffix_string());
         } else {
@@ -1382,18 +1390,21 @@ mod tests {
     fn cross_axis_multiplies_zip_rows() {
         // 2 zip rows × 3 cross values = 6 total variants.
         let spec: VariantsSpec =
-            syn::parse_str("M = [8, 16], PATH = cross[a, b, c], suffix = \"{PATH}_{M}\"")
-                .unwrap();
+            syn::parse_str("M = [8, 16], PATH = cross[a, b, c], suffix = \"{PATH}_{M}\"").unwrap();
         assert_eq!(spec.variant_count, 6);
-        assert_eq!(spec.params.len(), 1);       // M is a zip axis
+        assert_eq!(spec.params.len(), 1); // M is a zip axis
         assert_eq!(spec.cross_params.len(), 1); // PATH is a cross axis
         let rows = spec.rows();
         assert_eq!(rows.len(), 6);
         // Cross-major: a×8, a×16, b×8, b×16, c×8, c×16
         assert!(matches!(&rows[0][0], (n, VariantValue::Int(8)) if n == "M"));
         assert!(matches!(&rows[1][0], (n, VariantValue::Int(16)) if n == "M"));
-        assert!(matches!(&rows[0][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "a"));
-        assert!(matches!(&rows[2][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "b"));
+        assert!(
+            matches!(&rows[0][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "a")
+        );
+        assert!(
+            matches!(&rows[2][1], (n, VariantValue::Named { name, .. }) if n == "PATH" && name == "b")
+        );
     }
 
     #[test]
@@ -1407,9 +1418,15 @@ mod tests {
         assert_eq!(spec.params[0].0, "FMT");
         assert_eq!(spec.params[1].0, "BITS");
         // FMT labels get sequential integers: mxfp4=0, nvfp4=1, int8=2
-        assert!(matches!(&spec.params[0].1[0], VariantValue::Named { name, value } if name == "mxfp4" && *value == 0));
-        assert!(matches!(&spec.params[0].1[1], VariantValue::Named { name, value } if name == "nvfp4" && *value == 1));
-        assert!(matches!(&spec.params[0].1[2], VariantValue::Named { name, value } if name == "int8" && *value == 2));
+        assert!(
+            matches!(&spec.params[0].1[0], VariantValue::Named { name, value } if name == "mxfp4" && *value == 0)
+        );
+        assert!(
+            matches!(&spec.params[0].1[1], VariantValue::Named { name, value } if name == "nvfp4" && *value == 1)
+        );
+        assert!(
+            matches!(&spec.params[0].1[2], VariantValue::Named { name, value } if name == "int8" && *value == 2)
+        );
         assert_eq!(int_vals(&spec.params[1].1), vec![4, 4, 8]);
     }
 
@@ -1426,10 +1443,16 @@ mod tests {
         let rows = spec.rows();
         assert_eq!(rows.len(), 6);
         // Row 0: (FMT=mxfp4, BITS=4, PATH=audio)
-        assert!(matches!(&rows[0][0], (n, VariantValue::Named { name, .. }) if n == "FMT" && name == "mxfp4"));
-        assert!(matches!(&rows[0][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "audio" && *value == 0));
+        assert!(
+            matches!(&rows[0][0], (n, VariantValue::Named { name, .. }) if n == "FMT" && name == "mxfp4")
+        );
+        assert!(
+            matches!(&rows[0][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "audio" && *value == 0)
+        );
         // Row 3: (FMT=mxfp4, BITS=4, PATH=fishspeech)
-        assert!(matches!(&rows[3][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "fishspeech" && *value == 1));
+        assert!(
+            matches!(&rows[3][2], (n, VariantValue::Named { name, value }) if n == "PATH" && name == "fishspeech" && *value == 1)
+        );
     }
 
     // ── eval_suffix / eval_expr ───────────────────────────────────────────────
@@ -1985,19 +2008,19 @@ mod tests {
 
     #[test]
     fn named_label_suffix_uses_name_not_integer() {
-        let params = HashMap::from([(
-            "FMT".to_string(),
-            VariantValue::Named { name: "mxfp4".to_string(), value: 0 },
-        )]);
+        let params = HashMap::from([("FMT".to_string(), VariantValue::Named {
+            name: "mxfp4".to_string(),
+            value: 0,
+        })]);
         assert_eq!(eval_suffix("{FMT}", &params).unwrap(), "mxfp4");
     }
 
     #[test]
     fn named_label_suffix_arithmetic_uses_integer() {
-        let params = HashMap::from([(
-            "FMT".to_string(),
-            VariantValue::Named { name: "mxfp4".to_string(), value: 3 },
-        )]);
+        let params = HashMap::from([("FMT".to_string(), VariantValue::Named {
+            name: "mxfp4".to_string(),
+            value: 3,
+        })]);
         // Arithmetic expressions use the integer value, not the label.
         assert_eq!(eval_suffix("{FMT + 1}", &params).unwrap(), "4");
     }
@@ -2010,10 +2033,11 @@ mod tests {
 
     #[test]
     fn named_label_body_substitution_emits_integer() {
-        let params: HashMap<String, VariantValue> = HashMap::from([(
-            "FMT".to_string(),
-            VariantValue::Named { name: "mxfp4".to_string(), value: 0 },
-        )]);
+        let params: HashMap<String, VariantValue> =
+            HashMap::from([("FMT".to_string(), VariantValue::Named {
+                name: "mxfp4".to_string(),
+                value: 0,
+            })]);
         let ts: TokenStream = quote::quote! { if FMT == 0u32 { 1u32 } else { 2u32 } };
         let out = substitute_tokens(ts, &params).to_string();
         // Compile-time if: FMT==0 is true → branch is { 1u32 }
@@ -2023,10 +2047,8 @@ mod tests {
 
     #[test]
     fn named_label_auto_suffix_uses_name() {
-        let pairs = vec![("FMT".to_string(), VariantValue::Named {
-            name: "nvfp4".to_string(),
-            value: 1,
-        })];
+        let pairs =
+            vec![("FMT".to_string(), VariantValue::Named { name: "nvfp4".to_string(), value: 1 })];
         assert_eq!(auto_suffix(&pairs), "fmtnvfp4");
     }
 
@@ -2042,8 +2064,8 @@ mod tests {
             .iter()
             .map(|(name, vals)| (name.clone(), vals[0].clone()))
             .collect::<Vec<_>>();
-        let s = eval_suffix("{DILATED}_{FMT}", &v0.iter().cloned().collect::<HashMap<_, _>>())
-            .unwrap();
+        let s =
+            eval_suffix("{DILATED}_{FMT}", &v0.iter().cloned().collect::<HashMap<_, _>>()).unwrap();
         assert_eq!(s, "0_mxfp4");
     }
 
@@ -2052,10 +2074,7 @@ mod tests {
         // Same label appearing multiple times in a list must carry the same
         // integer value (first-occurrence wins), so compile-time `if FMT == 0u32`
         // matches in all rows where FMT=mxfp4, not just the first.
-        let spec: VariantsSpec = syn::parse_str(
-            "FMT = [mxfp4, nvfp4, mxfp4, nvfp4]",
-        )
-        .unwrap();
+        let spec: VariantsSpec = syn::parse_str("FMT = [mxfp4, nvfp4, mxfp4, nvfp4]").unwrap();
         let vals = &spec.params[0].1;
         // First occurrence: mxfp4=0, nvfp4=1.  Repeated occurrences reuse same value.
         assert!(matches!(&vals[0], VariantValue::Named { name, value: 0 } if name == "mxfp4"));
