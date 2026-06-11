@@ -37,37 +37,31 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 **1. Write a kernel.** One `#[kernel]` definition lowers to MSL, CUDA, HIP, and SPIR-V. `variants(...)` stamps out compile-time specialisations at macro-expansion time — each with its own name, signature, and inventory entry — multiplied by the three dtype variants (`f32` / `f16` / `bf16`) the macro generates automatically:
 
 ```rust
-// 1 function → 6 bit-width variants × 3 dtypes = 18 kernels per backend.
-// BITS is substituted at macro-expansion time; unused bit-extract paths
-// constant-fold away in each specialisation.
+// 1 function → 6 variants × 3 dtypes = 18 kernels, compiled for each backend.
 #[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
 pub fn dequant_gather<T>(
-    weight:  Tensor<u32>,
-    scales:  Tensor<T>,
-    biases:  Tensor<T>,
-    indices: Tensor<u32>,
-    out:     Tensor<T>,
-    #[constexpr] hidden:     u32,
-    #[constexpr] group_size: u32,
+    weight: Tensor<u32>, scales: Tensor<T>, biases: Tensor<T>,
+    indices: Tensor<u32>, out: Tensor<T>,
+    #[constexpr] hidden: u32, #[constexpr] group_size: u32,
 ) {
     let idx      = program_id::<0>();
     let token    = idx / hidden;
     let d        = idx - token * hidden;
     let token_id = load(indices[token]);
 
-    let g        = d / group_size;
     let row_off  = token_id * (hidden * BITS / 32u32);
     let bit_off  = d * BITS;
     let word_idx = bit_off / 32u32;
     let bit_in_w = bit_off & 31u32;
-
     let lo_bits  = select(32u32 - bit_in_w >= BITS, BITS, 32u32 - bit_in_w);
     let spill    = BITS - lo_bits;
-    let w0       = load(weight[row_off + word_idx]);
-    let w1       = load(weight[row_off + select(spill > 0u32, word_idx + 1u32, word_idx)]);
-    let q        = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32)
-                 | (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
 
+    let w0 = load(weight[row_off + word_idx]);
+    let w1 = load(weight[row_off + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+    let q  = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32)
+           | (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+
+    let g     = d / group_size;
     let gprow = hidden / group_size;
     let scale = load(scales[token_id * gprow + g]).cast::<f32>();
     let bias  = load(biases[token_id * gprow + g]).cast::<f32>();
@@ -75,15 +69,16 @@ pub fn dequant_gather<T>(
 }
 ```
 
-```
-// Generated kernels — compiled for every enabled backend (MSL · CUDA · HIP · SPIR-V):
-dequant_gather_int2  ·  dequant_gather_int2_f16  ·  dequant_gather_int2_bf16
-dequant_gather_int3  ·  dequant_gather_int3_f16  ·  dequant_gather_int3_bf16
-dequant_gather_int4  ·  dequant_gather_int4_f16  ·  dequant_gather_int4_bf16
-dequant_gather_int5  ·  dequant_gather_int5_f16  ·  dequant_gather_int5_bf16
-dequant_gather_int6  ·  dequant_gather_int6_f16  ·  dequant_gather_int6_bf16
-dequant_gather_int8  ·  dequant_gather_int8_f16  ·  dequant_gather_int8_bf16
-```
+Generated for every enabled backend (MSL · CUDA · HIP · SPIR-V):
+
+| | `f32` | `f16` | `bf16` |
+|---|---|---|---|
+| **int2** | `dequant_gather_int2` | `dequant_gather_int2_f16` | `dequant_gather_int2_bf16` |
+| **int3** | `dequant_gather_int3` | `dequant_gather_int3_f16` | `dequant_gather_int3_bf16` |
+| **int4** | `dequant_gather_int4` | `dequant_gather_int4_f16` | `dequant_gather_int4_bf16` |
+| **int5** | `dequant_gather_int5` | `dequant_gather_int5_f16` | `dequant_gather_int5_bf16` |
+| **int6** | `dequant_gather_int6` | `dequant_gather_int6_f16` | `dequant_gather_int6_bf16` |
+| **int8** | `dequant_gather_int8` | `dequant_gather_int8_f16` | `dequant_gather_int8_bf16` |
 
 **2. Install the CLI and run.**
 
