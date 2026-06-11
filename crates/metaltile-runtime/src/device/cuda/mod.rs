@@ -1161,20 +1161,23 @@ impl CudaDevice {
                 &opn as *const c_int as *const c_void,
                 std::mem::size_of::<c_int>(),
             );
-            // Per-tensor f32 scales (default SCALAR mode — no scale-mode attr
-            // needed). With the col-major reorder A=W and B=X.
+            // Per-tensor f32 scales (default SCALAR mode). ptr==0 => skip
+            // (caller folds per-channel/per-token scales as a post-pass).
+            // With the col-major reorder A=W and B=X.
+            if w_scale != 0 {
             cublasLtMatmulDescSetAttribute(
                 desc,
                 CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                 &w_scale as *const CUdeviceptr as *const c_void,
                 std::mem::size_of::<CUdeviceptr>(),
-            );
+            ); }
+            if x_scale != 0 {
             cublasLtMatmulDescSetAttribute(
                 desc,
                 CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                 &x_scale as *const CUdeviceptr as *const c_void,
                 std::mem::size_of::<CUdeviceptr>(),
-            );
+            ); }
             let mut a_l: cublasLtMatrixLayout_t = ptr::null_mut();
             let mut b_l: cublasLtMatrixLayout_t = ptr::null_mut();
             let mut d_l: cublasLtMatrixLayout_t = ptr::null_mut();
