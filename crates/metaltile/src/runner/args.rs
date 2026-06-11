@@ -26,6 +26,14 @@ pub struct RunnerArgs {
     /// Optional name filter — only items whose name contains this substring
     /// are processed.
     pub filter: Option<String>,
+    /// Only run items whose name matches this regex (case-insensitive).
+    pub match_name: Option<String>,
+    /// Exclude items whose name matches this regex (case-insensitive).
+    pub no_match_name: Option<String>,
+    /// Only run items whose op group matches this regex (case-insensitive).
+    pub match_group: Option<String>,
+    /// Exclude items whose op group matches this regex (case-insensitive).
+    pub no_match_group: Option<String>,
     /// Dtype filter (e.g. `"f16"`). `None` means all supported dtypes.
     pub dtype: Option<String>,
     /// For `inspect`: which representation to emit (`msl`, `ir`, `stats`,
@@ -55,9 +63,11 @@ impl RunnerArgs {
     ///
     /// Expected invocation format (produced by `ProjectRunner` in the CLI):
     /// ```text
-    /// __tile_runner bench [--filter <pat>] [--dtype <dt>] [--profile]
+    /// __tile_runner bench [--filter <pat>] [--match-name <re>] [--no-match-name <re>]
+    ///                     [--match-group <re>] [--no-match-group <re>]
+    ///                     [--dtype <dt>] [--profile]
     ///                     [--warmup-runs <n>] [--runs <n>]
-    /// __tile_runner test  [--filter <pat>] [--dtype <dt>]
+    /// __tile_runner test  [--filter <pat>] [--match-name <re>] [--dtype <dt>]
     /// __tile_runner build [--filter <pat>] [--dtype <dt>]
     /// __tile_runner inspect [--filter <pat>] [--kind <msl|ir|stats|listing>]
     /// ```
@@ -77,6 +87,10 @@ impl RunnerArgs {
         };
 
         let mut filter = None;
+        let mut match_name = None;
+        let mut no_match_name = None;
+        let mut match_group = None;
+        let mut no_match_group = None;
         let mut dtype = None;
         let mut inspect_kind = None;
         let mut profile = false;
@@ -91,6 +105,10 @@ impl RunnerArgs {
         while let Some(flag) = it.next() {
             match flag.as_str() {
                 "--filter" => filter = it.next(),
+                "--match-name" => match_name = it.next(),
+                "--no-match-name" => no_match_name = it.next(),
+                "--match-group" => match_group = it.next(),
+                "--no-match-group" => no_match_group = it.next(),
                 "--dtype" => dtype = it.next(),
                 "--kind" => inspect_kind = it.next(),
                 "--profile" => profile = true,
@@ -116,6 +134,10 @@ impl RunnerArgs {
         Ok(RunnerArgs {
             command,
             filter,
+            match_name,
+            no_match_name,
+            match_group,
+            no_match_group,
             dtype,
             inspect_kind,
             profile,
@@ -160,6 +182,26 @@ mod tests {
         let a = RunnerArgs::parse(vec!["inspect".into(), "--kind".into(), "msl".into()]).unwrap();
         assert_eq!(a.command, RunnerCommand::Inspect);
         assert_eq!(a.inspect_kind.as_deref(), Some("msl"));
+    }
+
+    #[test]
+    fn parse_bench_with_name_and_group_filters() {
+        let a = RunnerArgs::parse(vec![
+            "bench".into(),
+            "--match-name".into(),
+            "dequant_.*_int4".into(),
+            "--no-match-name".into(),
+            "slow$".into(),
+            "--match-group".into(),
+            "sdpa".into(),
+            "--no-match-group".into(),
+            "conv".into(),
+        ])
+        .unwrap();
+        assert_eq!(a.match_name.as_deref(), Some("dequant_.*_int4"));
+        assert_eq!(a.no_match_name.as_deref(), Some("slow$"));
+        assert_eq!(a.match_group.as_deref(), Some("sdpa"));
+        assert_eq!(a.no_match_group.as_deref(), Some("conv"));
     }
 
     #[test]

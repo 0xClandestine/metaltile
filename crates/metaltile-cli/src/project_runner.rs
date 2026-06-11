@@ -23,6 +23,14 @@ pub struct RunnerInvocation {
     pub command: String,
     /// Optional name filter (passed as `--filter`).
     pub filter: Option<String>,
+    /// Only run items whose name matches this regex (passed as `--match-name`).
+    pub match_name: Option<String>,
+    /// Exclude items whose name matches this regex (passed as `--no-match-name`).
+    pub no_match_name: Option<String>,
+    /// Only run items whose op group matches this regex (passed as `--match-group`).
+    pub match_group: Option<String>,
+    /// Exclude items whose op group matches this regex (passed as `--no-match-group`).
+    pub no_match_group: Option<String>,
     /// Optional dtype filter (passed as `--dtype`).
     pub dtype: Option<String>,
     /// Optional inspect kind (passed as `--kind`).
@@ -150,6 +158,22 @@ fn build_argv(inv: &RunnerInvocation) -> Vec<String> {
     if let Some(f) = &inv.filter {
         argv.push("--filter".to_string());
         argv.push(f.clone());
+    }
+    if let Some(m) = &inv.match_name {
+        argv.push("--match-name".to_string());
+        argv.push(m.clone());
+    }
+    if let Some(m) = &inv.no_match_name {
+        argv.push("--no-match-name".to_string());
+        argv.push(m.clone());
+    }
+    if let Some(m) = &inv.match_group {
+        argv.push("--match-group".to_string());
+        argv.push(m.clone());
+    }
+    if let Some(m) = &inv.no_match_group {
+        argv.push("--no-match-group".to_string());
+        argv.push(m.clone());
     }
     if let Some(d) = &inv.dtype {
         argv.push("--dtype".to_string());

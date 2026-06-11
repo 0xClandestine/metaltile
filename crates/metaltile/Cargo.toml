@@ -31,6 +31,7 @@ inventory.workspace = true
 serde.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true
+regex.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true

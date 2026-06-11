@@ -62,6 +62,10 @@ pub fn run(args: &BuildArgs, harness: &crate::harness::Harness) -> Result<(), Cl
     let inv = RunnerInvocation {
         command: "build".into(),
         filter: args.filter_args.filter.clone(),
+        match_name: args.filter_args.match_name.clone(),
+        no_match_name: args.filter_args.no_match_name.clone(),
+        match_group: args.filter_args.match_group.clone(),
+        no_match_group: args.filter_args.no_match_group.clone(),
         dtype: args.dtypes.clone(),
         emit: args.emit.clone(),
         out_dir: args.out.clone(),
