@@ -93,7 +93,7 @@ mod enabled {
         runner::{
             args::RunnerArgs,
             emit::emit_stdout,
-            gpu::{BENCH_ITERS, BENCH_WARMUP, BenchStats},
+            gpu::{BENCH_ITERS, BENCH_WARMUP, BenchStats, elem_bytes},
             harness::{
                 NameFilter,
                 RunnerHarness,
@@ -171,7 +171,7 @@ mod enabled {
                 #[cfg(feature = "hip")]
                 BackendDevice::Hip(d) => format!("{} ({})", d.name(), d.gfx_arch()),
                 #[cfg(feature = "vulkan")]
-                BackendDevice::Vulkan(d) => d.name().to_string(),
+                BackendDevice::Vulkan(d) => d.device_label(),
             }
         }
 
@@ -192,8 +192,8 @@ mod enabled {
             }
         }
 
-        /// Event-timed per-launch samples in µs. `Ok(None)` when the
-        /// backend has no GPU-timestamp bench path yet (Vulkan).
+        /// Event-timed per-launch samples in µs (CUDA/HIP events, Vulkan
+        /// timestamp queries).
         fn bench_kernel(
             &self,
             kernel: &Kernel,
@@ -202,21 +202,17 @@ mod enabled {
             block: [u32; 3],
             warmup: u32,
             iters: u32,
-        ) -> Result<Option<Vec<f64>>, MetalTileError> {
+        ) -> Result<Vec<f64>, MetalTileError> {
             match self {
                 #[cfg(feature = "cuda")]
                 BackendDevice::Cuda(d) =>
-                    d.bench_kernel(kernel, buffers, grid, block, warmup, iters).map(Some),
+                    d.bench_kernel(kernel, buffers, grid, block, warmup, iters),
                 #[cfg(feature = "hip")]
                 BackendDevice::Hip(d) =>
-                    d.bench_kernel(kernel, buffers, grid, block, warmup, iters).map(Some),
+                    d.bench_kernel(kernel, buffers, grid, block, warmup, iters),
                 #[cfg(feature = "vulkan")]
-                BackendDevice::Vulkan(_) => {
-                    // Consume the launch params — Vulkan has no event-timed
-                    // bench path yet, but the signature stays uniform.
-                    let _ = (kernel, buffers, grid, block, warmup, iters);
-                    Ok(None)
-                },
+                BackendDevice::Vulkan(d) =>
+                    d.bench_kernel(kernel, buffers, grid, block, warmup, iters),
             }
         }
     }
@@ -301,20 +297,6 @@ mod enabled {
                 let name = test.name().to_string();
                 let dtype_str = format!("{dt:?}").to_lowercase();
 
-                // GPU-vs-GPU reference setups need two dispatches; not
-                // wired on the non-Metal paths yet.
-                if setup.ref_setup().is_some() {
-                    skipped += 1;
-                    emit_stdout(&ProtocolMessage::TestResult(TestResult {
-                        name,
-                        dtype: dtype_str,
-                        passed: false,
-                        max_err: 0.0,
-                        skipped: true,
-                    }));
-                    continue;
-                }
-
                 let mut buffers: BTreeMap<String, Vec<u8>> = BTreeMap::new();
                 for inp in setup.inputs() {
                     buffers.insert(inp.name().to_string(), inp.data().to_vec());
@@ -323,18 +305,74 @@ mod enabled {
                     buffers.insert(k.clone(), v.to_le_bytes());
                 }
 
+                // Expected values: the CPU oracle, or — for GPU-vs-GPU
+                // setups — the reference kernel run on this same device
+                // (mirroring the Metal harness). The reference's output
+                // dtype is looked up from the main setup's input buffer of
+                // the same name, as on Metal.
+                let expected: Vec<(String, Vec<u8>, DType)> =
+                    if let Some(reference) = setup.ref_setup() {
+                        let mut ref_bufs: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+                        for inp in reference.inputs() {
+                            ref_bufs.insert(inp.name().to_string(), inp.data().to_vec());
+                        }
+                        for (k, v) in reference.constexprs() {
+                            ref_bufs.insert(k.clone(), v.to_le_bytes());
+                        }
+                        let rg = reference.grid();
+                        match dev.run_kernel(reference.kernel(), &ref_bufs, rg.grid, rg.tpg) {
+                            Ok(ref_outputs) => ref_outputs
+                                .into_iter()
+                                .map(|(n, bytes)| {
+                                    let d = setup
+                                        .inputs()
+                                        .iter()
+                                        .find(|b| b.name() == n)
+                                        .map_or(DType::F32, |b| b.dtype());
+                                    (n, bytes, d)
+                                })
+                                .collect(),
+                            Err(e) if is_unsupported(&e) => {
+                                skipped += 1;
+                                emit_stdout(&ProtocolMessage::TestResult(TestResult {
+                                    name,
+                                    dtype: dtype_str,
+                                    passed: false,
+                                    max_err: 0.0,
+                                    skipped: true,
+                                }));
+                                continue;
+                            },
+                            Err(e) => {
+                                failed += 1;
+                                emit_stdout(&ProtocolMessage::ProtocolError {
+                                    name,
+                                    dtype: dtype_str,
+                                    message: format!("reference dispatch: {e}"),
+                                });
+                                continue;
+                            },
+                        }
+                    } else {
+                        setup
+                            .expected()
+                            .iter()
+                            .map(|b| (b.name().to_string(), b.data().to_vec(), b.dtype()))
+                            .collect()
+                    };
+
                 let grid = setup.grid();
                 match dev.run_kernel(setup.kernel(), &buffers, grid.grid, grid.tpg) {
                     Ok(outputs) => {
                         let mut worst = 0.0f32;
-                        for exp in setup.expected() {
-                            let Some(got_bytes) = outputs.get(exp.name()) else {
+                        for (bname, exp_bytes, bdt) in &expected {
+                            let Some(got_bytes) = outputs.get(bname) else {
                                 worst = f32::INFINITY;
                                 break;
                             };
-                            let n = exp.len();
-                            let got = read_raw_f32(got_bytes, exp.dtype(), n);
-                            let want = read_raw_f32(exp.data(), exp.dtype(), n);
+                            let n = exp_bytes.len() / elem_bytes(*bdt).max(1);
+                            let got = read_raw_f32(got_bytes, *bdt, n);
+                            let want = read_raw_f32(exp_bytes, *bdt, n);
                             worst = worst.max(max_abs_diff(&got, &want));
                         }
                         let ok = (worst as f64) <= tol;
@@ -445,7 +483,7 @@ mod enabled {
 
             let grid = setup.grid();
             match dev.bench_kernel(kernel, &buffers, grid.grid, grid.tpg, warmup, iters) {
-                Ok(Some(samples)) if !samples.is_empty() => {
+                Ok(samples) if !samples.is_empty() => {
                     let stats = BenchStats::from_samples(samples);
                     // Effective bandwidth from steady-state (min) latency.
                     let mt_gbps = if stats.min_us > 0.0 {
@@ -481,20 +519,8 @@ mod enabled {
                         profile: None,
                     }));
                 },
-                Ok(Some(_)) => {
+                Ok(_) => {
                     skipped += 1;
-                },
-                Ok(None) => {
-                    failed += 1;
-                    emit_stdout(&ProtocolMessage::ProtocolError {
-                        name,
-                        dtype: dtype_str,
-                        message: format!(
-                            "kernel-time benchmarking is not wired for the {backend} \
-                             backend yet (no GPU-timestamp path) — use `tile test \
-                             --backend {backend}` for correctness"
-                        ),
-                    });
                 },
                 Err(e) if is_unsupported(&e) => {
                     skipped += 1;

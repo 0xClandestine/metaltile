@@ -35,6 +35,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-identifiers]
+# Vulkan spec field name (VkPhysicalDeviceLimits.maxSamplerLodBias)
+maxSamplerLodBias = "maxSamplerLodBias"
 
 # Weird syntax, but this how you ignore corrections for certain words.
 [default.extend-words]
