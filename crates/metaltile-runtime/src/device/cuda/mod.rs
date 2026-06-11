@@ -637,6 +637,165 @@ impl CudaDevice {
         }
     }
 
+    /// CUTLASS grouped block-scaled NVFP4 MoE GEMM (AOT-linked, sm_120a/121a).
+    /// `a` = packed e2m1 sorted-token activations `[mt, K/2]` bytes, `sfa` =
+    /// per-group ue4m3 scale pool (group g's blob at byte `sfa_off[g]`, laid out
+    /// for the group-LOCAL row), `w`/`sfw` = packed e2m1 + scale expert slabs
+    /// (`[n_exp, N*K/2]` / `[n_exp, ceil(N/128)*512*ceil(K/64)]` bytes), `c` =
+    /// f16 out `[mt, N]`. `group_rows`/`expert_ids`/`sfa_off` are HOST slices.
+    /// `out[t,n] = Σ_k a[t,k]·w[eid][n,k]` with per-16-block scales on both
+    /// operands. Errors if the runtime was built without CUTLASS.
+    #[allow(clippy::too_many_arguments)] // mirrors the C entry point's signature
+    pub fn moe_grouped_cutlass_fp4(
+        &self,
+        a: CUdeviceptr,
+        sfa: CUdeviceptr,
+        w: CUdeviceptr,
+        sfw: CUdeviceptr,
+        c: CUdeviceptr,
+        group_rows: &[i32],
+        expert_ids: &[i32],
+        sfa_off: &[i64],
+        alpha_vec: CUdeviceptr, // device f32[n_groups] per-group scales, 0 = none
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalTileError> {
+        self.ensure_current();
+        #[cfg(have_cutlass)]
+        {
+            unsafe extern "C" {
+                fn moe_grouped_gemm_cutlass_fp4(
+                    a: *const c_void,
+                    sfa: *const c_void,
+                    w: *const c_void,
+                    sfw: *const c_void,
+                    c: *mut c_void,
+                    group_rows: *const c_int,
+                    expert_ids: *const c_int,
+                    sfa_off: *const i64,
+                    alpha_vec: *const c_void,
+                    n_groups: c_int,
+                    n: c_int,
+                    k: c_int,
+                    stream: *mut c_void,
+                ) -> c_int;
+            }
+            if group_rows.len() != expert_ids.len() || group_rows.len() != sfa_off.len() {
+                return Err(MetalTileError::Dispatch(
+                    "moe_grouped_cutlass_fp4: group_rows/expert_ids/sfa_off len mismatch".into(),
+                ));
+            }
+            let r = unsafe {
+                moe_grouped_gemm_cutlass_fp4(
+                    a as *const c_void,
+                    sfa as *const c_void,
+                    w as *const c_void,
+                    sfw as *const c_void,
+                    c as *mut c_void,
+                    group_rows.as_ptr(),
+                    expert_ids.as_ptr(),
+                    sfa_off.as_ptr(),
+                    alpha_vec as *const c_void,
+                    group_rows.len() as c_int,
+                    n as c_int,
+                    k as c_int,
+                    self.stream as *mut c_void,
+                )
+            };
+            if r != 0 {
+                return Err(MetalTileError::Dispatch(format!(
+                    "moe_grouped_gemm_cutlass_fp4 failed: code {r}"
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(not(have_cutlass))]
+        {
+            let _ = (a, sfa, w, sfw, c, group_rows, expert_ids, sfa_off, alpha_vec, n, k);
+            Err(MetalTileError::Dispatch(
+                "moe_grouped_cutlass_fp4: runtime built without CUTLASS (set CUTLASS_DIR)".into(),
+            ))
+        }
+    }
+
+    /// Persistent-handle variant of the CUTLASS grouped NVFP4 GEMM: descriptors
+    /// are derived ON DEVICE from the group-offsets buffer each call (one tiny
+    /// fill kernel + gemm.run) — no host build, no per-call allocs, graph-safe.
+    /// `prepare` once per (weight slab, n_groups, N, K); `run` per call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn moe_grouped_cutlass_fp4_prepare(
+        &self,
+        w: CUdeviceptr,
+        sfw: CUdeviceptr,
+        alpha_vec: CUdeviceptr,
+        n_groups: usize,
+        n: usize,
+        k: usize,
+        max_m_total: usize,
+    ) -> Result<u64, MetalTileError> {
+        self.ensure_current();
+        #[cfg(have_cutlass)]
+        {
+            unsafe extern "C" {
+                fn moe_grouped_gemm_cutlass_fp4_prepare(
+                    b: *const c_void, sfb: *const c_void, alpha_vec: *const c_void,
+                    n_groups: c_int, n: c_int, k: c_int, max_m_total: c_int,
+                ) -> *mut c_void;
+            }
+            let h = unsafe {
+                moe_grouped_gemm_cutlass_fp4_prepare(
+                    w as *const c_void, sfw as *const c_void, alpha_vec as *const c_void,
+                    n_groups as c_int, n as c_int, k as c_int, max_m_total as c_int)
+            };
+            if h.is_null() {
+                return Err(MetalTileError::Dispatch("cutlass_fp4_prepare failed".into()));
+            }
+            Ok(h as u64)
+        }
+        #[cfg(not(have_cutlass))]
+        {
+            let _ = (w, sfw, alpha_vec, n_groups, n, k, max_m_total);
+            Err(MetalTileError::Dispatch("built without CUTLASS (set CUTLASS_DIR)".into()))
+        }
+    }
+
+    /// Per-call run against a prepared handle. `off_dev` = device u32
+    /// `[n_groups+1]` row offsets (the router's expert offsets).
+    pub fn moe_grouped_cutlass_fp4_run(
+        &self,
+        handle: u64,
+        a: CUdeviceptr,
+        sfa: CUdeviceptr,
+        d_out: CUdeviceptr,
+        off_dev: CUdeviceptr,
+    ) -> Result<(), MetalTileError> {
+        self.ensure_current();
+        #[cfg(have_cutlass)]
+        {
+            unsafe extern "C" {
+                fn moe_grouped_gemm_cutlass_fp4_run(
+                    handle: *mut c_void, a: *const c_void, sfa: *const c_void,
+                    d: *mut c_void, off_dev: *const c_void, stream: *mut c_void,
+                ) -> c_int;
+            }
+            let r = unsafe {
+                moe_grouped_gemm_cutlass_fp4_run(
+                    handle as *mut c_void, a as *const c_void, sfa as *const c_void,
+                    d_out as *mut c_void, off_dev as *const c_void,
+                    self.stream as *mut c_void)
+            };
+            if r != 0 {
+                return Err(MetalTileError::Dispatch(format!("cutlass_fp4_run failed: code {r}")));
+            }
+            Ok(())
+        }
+        #[cfg(not(have_cutlass))]
+        {
+            let _ = (handle, a, sfa, d_out, off_dev);
+            Err(MetalTileError::Dispatch("built without CUTLASS (set CUTLASS_DIR)".into()))
+        }
+    }
+
     /// f16/bf16 inputs, **f32 output** — convenience wrapper over [`gemm_cublaslt`]
     /// that keeps the A/B (weight/activation) dtype but writes the result as f32.
     /// cuBLAS already accumulates in f32 (`CUBLAS_COMPUTE_32F`); only the D-layout

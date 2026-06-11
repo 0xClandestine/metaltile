@@ -101,34 +101,53 @@ fn cuda() {
         let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR set by cargo");
         let arch = std::env::var("NEMOTRON_CUTLASS_ARCH").unwrap_or_else(|_| "sm_121a".to_string());
         let nvcc = format!("{cuda_root}/bin/nvcc");
-        let src = format!("{}/cuda/cutlass_moe.cu", env!("CARGO_MANIFEST_DIR"));
-        println!("cargo:rerun-if-changed={src}");
-        let obj = format!("{out_dir}/cutlass_moe.o");
-        let status = std::process::Command::new(&nvcc)
-            .args([
-                "-O3",
-                "-std=c++17",
-                &format!("-arch={arch}"),
-                "--expt-relaxed-constexpr",
-                "-Xcompiler",
-                "-fPIC",
-            ])
-            .args([
-                "-I",
-                &format!("{cutlass_dir}/include"),
-                "-I",
-                &format!("{cutlass_dir}/tools/util/include"),
-            ])
-            .args(["-c", &src, "-o", &obj])
-            .status()
-            .expect("nvcc invocation for cutlass_moe.cu failed to start");
-        assert!(status.success(), "nvcc failed to compile cutlass_moe.cu");
+        // Block-scaled mma availability define for the FP4 grouped kernel:
+        // mirror the arch the objects are built for (sm_120a / sm_121a).
+        let mma_define = if arch.contains("121") {
+            Some("-DCUTLASS_ARCH_MMA_SM121_SUPPORTED=1")
+        } else if arch.contains("120") {
+            Some("-DCUTLASS_ARCH_MMA_SM120_SUPPORTED=1")
+        } else {
+            None
+        };
+        let compile = |src_name: &str, extra: &[&str]| -> String {
+            let src = format!("{}/cuda/{src_name}.cu", env!("CARGO_MANIFEST_DIR"));
+            println!("cargo:rerun-if-changed={src}");
+            let obj = format!("{out_dir}/{src_name}.o");
+            let status = std::process::Command::new(&nvcc)
+                .args([
+                    "-O3",
+                    "-std=c++17",
+                    &format!("-arch={arch}"),
+                    "--expt-relaxed-constexpr",
+                    "-Xcompiler",
+                    "-fPIC",
+                ])
+                .args(extra)
+                .args([
+                    "-I",
+                    &format!("{cutlass_dir}/include"),
+                    "-I",
+                    &format!("{cutlass_dir}/tools/util/include"),
+                ])
+                .args(["-c", &src, "-o", &obj])
+                .status()
+                .unwrap_or_else(|_| panic!("nvcc invocation for {src_name}.cu failed to start"));
+            assert!(status.success(), "nvcc failed to compile {src_name}.cu");
+            obj
+        };
+        let obj = compile("cutlass_moe", &[]);
+        let mut fp4_extra: Vec<&str> = vec!["--expt-extended-lambda"];
+        if let Some(d) = mma_define {
+            fp4_extra.push(d);
+        }
+        let obj_fp4 = compile("cutlass_moe_fp4", &fp4_extra);
         let lib = format!("{out_dir}/libcutlass_moe.a");
         let ar = std::process::Command::new("ar")
-            .args(["crs", &lib, &obj])
+            .args(["crs", &lib, &obj, &obj_fp4])
             .status()
             .expect("ar failed to start");
-        assert!(ar.success(), "ar failed to archive cutlass_moe.o");
+        assert!(ar.success(), "ar failed to archive cutlass_moe objects");
         println!("cargo:rustc-link-search=native={out_dir}");
         println!("cargo:rustc-link-lib=static=cutlass_moe");
         println!("cargo:rustc-link-lib=dylib=cudart");
