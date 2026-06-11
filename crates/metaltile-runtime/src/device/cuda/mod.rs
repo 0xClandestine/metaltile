@@ -990,6 +990,7 @@ impl CudaDevice {
         n: usize,
         k: usize,
         out_f32: bool,
+        d_scale: CUdeviceptr, // device f32 applied to D (per-tensor global fold); 0 = none
     ) -> Result<(), MetalTileError> {
         self.ensure_current();
         let (lt, workspace) = self.cublaslt_ctx()?;
@@ -1001,6 +1002,9 @@ impl CudaDevice {
             if s != CUBLAS_STATUS_SUCCESS {
                 return Err(MetalTileError::Dispatch(format!("cublasLtMatmulDescCreate: {s}")));
             }
+            // d_scale (per-tensor global fold) is applied POST-GEMM by the
+            // caller — cuBLASLt rejects D_SCALE on a non-quantized D (status 7).
+            let _ = d_scale;
             let opt = CUBLAS_OP_T;
             let opn = CUBLAS_OP_N;
             cublasLtMatmulDescSetAttribute(
