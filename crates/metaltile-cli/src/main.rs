@@ -384,6 +384,12 @@ struct BenchArgs {
     #[command(flatten)]
     filter_args: FilterArgs,
 
+    /// GPU backend to bench on. The runner binary must be built with the
+    /// matching cargo feature (`--features cuda|hip|vulkan`); `metal` is the
+    /// macOS default and needs no feature.
+    #[arg(long, value_name = "BACKEND", help_heading = "Bench options")]
+    backend: Option<BackendChoice>,
+
     /// Override the number of timed iterations (default: from tile.toml or 3).
     #[arg(long, value_name = "N", help_heading = "Bench options")]
     runs: Option<usize>,
@@ -454,8 +460,38 @@ struct TestArgs {
     #[arg(long, requires = "summary", help_heading = "Display options")]
     detailed: bool,
 
+    /// GPU backend to test on. The runner binary must be built with the
+    /// matching cargo feature (`--features cuda|hip|vulkan`); `metal` is the
+    /// macOS default and needs no feature.
+    #[arg(long, value_name = "BACKEND", help_heading = "Test options")]
+    backend: Option<BackendChoice>,
+
     #[command(flatten)]
     filter_args: FilterArgs,
+}
+
+/// GPU backend selector shared by `tile bench` / `tile test`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BackendChoice {
+    /// Apple Metal (macOS default).
+    Metal,
+    /// NVIDIA CUDA (NVRTC + Driver API).
+    Cuda,
+    /// AMD ROCm / HIP (hipRTC + HIP runtime).
+    Hip,
+    /// Vulkan / SPIR-V compute.
+    Vulkan,
+}
+
+impl BackendChoice {
+    fn as_runner_arg(self) -> &'static str {
+        match self {
+            BackendChoice::Metal => "metal",
+            BackendChoice::Cuda => "cuda",
+            BackendChoice::Hip => "hip",
+            BackendChoice::Vulkan => "vulkan",
+        }
+    }
 }
 
 // ── Build ────────────────────────────────────────────────────────────────

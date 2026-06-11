@@ -14,7 +14,7 @@ workspace = true
 [features]
 # Run the registered #[test_kernel] corpus on the CUDA backend
 # (tests/cuda_kernel_corpus.rs). Forwards to metaltile-runtime/cuda.
-cuda = ["metaltile-runtime/cuda"]
+cuda = ["metaltile/cuda"]
 # Run the registered #[test_kernel] corpus on the HIP / ROCm backend
 # (tests/hip_kernel_corpus.rs). Forwards to the facade's hip feature.
 hip = ["metaltile/hip"]

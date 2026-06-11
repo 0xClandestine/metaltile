@@ -107,6 +107,9 @@ pub use metaltile_runtime::{
 };
 /// Runtime context, dispatch result, and top-level runtime error.
 pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
+/// CUDA / NVIDIA device runtime entry points (feature `cuda`).
+#[cfg(feature = "cuda")]
+pub use metaltile_runtime::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};
 /// HIP / ROCm device runtime entry points (feature `hip`).
 #[cfg(feature = "hip")]
 pub use metaltile_runtime::{HipBuffer, HipDevice, HipKernel, HipModuleHandle};

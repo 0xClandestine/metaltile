@@ -36,6 +36,9 @@ pub struct RunnerArgs {
     pub no_match_group: Option<String>,
     /// Dtype filter (e.g. `"f16"`). `None` means all supported dtypes.
     pub dtype: Option<String>,
+    /// GPU backend to run on (`metal`, `cuda`, `hip`, `vulkan`). `None`
+    /// means the platform default (Metal).
+    pub backend: Option<String>,
     /// For `inspect`: which representation to emit (`msl`, `ir`, `stats`,
     /// `listing`).
     pub inspect_kind: Option<String>,
@@ -92,6 +95,7 @@ impl RunnerArgs {
         let mut match_group = None;
         let mut no_match_group = None;
         let mut dtype = None;
+        let mut backend = None;
         let mut inspect_kind = None;
         let mut profile = false;
         let mut warmup: Option<usize> = None;
@@ -110,6 +114,7 @@ impl RunnerArgs {
                 "--match-group" => match_group = it.next(),
                 "--no-match-group" => no_match_group = it.next(),
                 "--dtype" => dtype = it.next(),
+                "--backend" => backend = it.next(),
                 "--kind" => inspect_kind = it.next(),
                 "--profile" => profile = true,
                 "--warmup-runs" => {
@@ -139,6 +144,7 @@ impl RunnerArgs {
             match_group,
             no_match_group,
             dtype,
+            backend,
             inspect_kind,
             profile,
             warmup,
@@ -182,6 +188,14 @@ mod tests {
         let a = RunnerArgs::parse(vec!["inspect".into(), "--kind".into(), "msl".into()]).unwrap();
         assert_eq!(a.command, RunnerCommand::Inspect);
         assert_eq!(a.inspect_kind.as_deref(), Some("msl"));
+    }
+
+    #[test]
+    fn parse_bench_with_backend() {
+        let a = RunnerArgs::parse(vec!["bench".into(), "--backend".into(), "cuda".into()]).unwrap();
+        assert_eq!(a.backend.as_deref(), Some("cuda"));
+        let b = RunnerArgs::parse(vec!["test".into()]).unwrap();
+        assert!(b.backend.is_none());
     }
 
     #[test]

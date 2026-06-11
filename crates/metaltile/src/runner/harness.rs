@@ -40,6 +40,25 @@ pub struct RunnerHarness;
 impl RunnerHarness {
     /// Run the full harness.  Returns `true` if every item passed / compiled.
     pub fn run(args: &RunnerArgs) -> bool {
+        // `--backend cuda|hip|vulkan` routes bench/test through the device
+        // runtimes instead of the Metal GpuRunner/Context.
+        if let Some(backend) = crate::runner::backend::requested(args) {
+            return match args.command {
+                RunnerCommand::Bench => crate::runner::backend::run_bench(args, backend),
+                RunnerCommand::Test => crate::runner::backend::run_test(args, backend),
+                RunnerCommand::Build | RunnerCommand::Inspect => {
+                    emit_stdout(&ProtocolMessage::ProtocolError {
+                        name: "backend".into(),
+                        dtype: "".into(),
+                        message: format!(
+                            "--backend {backend} applies to bench/test only — build and \
+                             inspect always emit MSL"
+                        ),
+                    });
+                    false
+                },
+            };
+        }
         match args.command {
             RunnerCommand::Bench => Self::run_bench(args),
             RunnerCommand::Test => Self::run_test(args),
@@ -777,7 +796,7 @@ impl RunnerHarness {
     /// `--dtype` restriction. `None` = no restriction — every item runs at
     /// its *declared* dtypes (so u32/i32-only entries aren't silently
     /// skipped or, worse, run at float dtypes they never declared).
-    fn dtype_list(args: &RunnerArgs) -> Option<Vec<DType>> {
+    pub(crate) fn dtype_list(args: &RunnerArgs) -> Option<Vec<DType>> {
         let s = args.dtype.as_ref()?;
         parse_dtype(s).map(|d| vec![d]).or_else(|| {
             eprintln!("unknown dtype '{s}'; using f32");
@@ -1190,7 +1209,7 @@ pub fn run_kernel_test(
     Ok(TestOutcome { passed: (worst as f64) <= tol, max_abs_err: worst, n_checked })
 }
 
-fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
+pub(crate) fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
     match dt {
         DType::F32 => bytes
             .chunks_exact(4)
@@ -1245,7 +1264,7 @@ fn read_raw_f32(bytes: &[u8], dt: DType, n: usize) -> Vec<f32> {
 /// The registered kernel name with the dtype suffix appended, mirroring the
 /// names the build path emits (`mt_exp` at f32 → `mt_exp_f32`). Names that
 /// already carry the suffix (single-dtype variants benches) pass through.
-fn suffixed_kernel_name(kernel_name: &str, dt: DType) -> String {
+pub(crate) fn suffixed_kernel_name(kernel_name: &str, dt: DType) -> String {
     let suffix = codegen_emit::dtype_suffix(dt);
     if kernel_name.ends_with(&format!("_{suffix}")) {
         kernel_name.to_string()
@@ -1257,7 +1276,7 @@ fn suffixed_kernel_name(kernel_name: &str, dt: DType) -> String {
 /// Resolve a bench's display name for one dtype. Runs the setup fn (the
 /// kernel IR only exists inside it), so callers should reach for this in
 /// filter pre-passes only — not on the unfiltered hot path.
-fn bench_display_name(bench: &'static dyn KernelBench, dt: DType) -> String {
+pub(crate) fn bench_display_name(bench: &'static dyn KernelBench, dt: DType) -> String {
     suffixed_kernel_name(&bench.setup(dt).kernel().name, dt)
 }
 
@@ -1266,7 +1285,7 @@ fn bench_display_name(bench: &'static dyn KernelBench, dt: DType) -> String {
 /// `--no-match-group` so filtering happens *before* GPU work — previously
 /// only `--filter` crossed the subprocess boundary and a `--match-name` run
 /// benched the full corpus while printing nothing (#279).
-struct NameFilter {
+pub(crate) struct NameFilter {
     filter: Option<String>,
     match_name: Option<regex::Regex>,
     no_match_name: Option<regex::Regex>,
@@ -1275,7 +1294,7 @@ struct NameFilter {
 }
 
 impl NameFilter {
-    fn from_args(args: &RunnerArgs) -> Result<Self, String> {
+    pub(crate) fn from_args(args: &RunnerArgs) -> Result<Self, String> {
         fn re(s: Option<&str>, flag: &str) -> Result<Option<regex::Regex>, String> {
             s.map(|p| {
                 regex::Regex::new(&format!("(?i){p}"))
@@ -1292,7 +1311,7 @@ impl NameFilter {
         })
     }
 
-    fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.filter.is_none()
             && self.match_name.is_none()
             && self.no_match_name.is_none()
@@ -1306,7 +1325,7 @@ impl NameFilter {
     /// fn ident. Group predicates accept either `family` (the source dir
     /// below `src/` — what the CI shards select with `--match-group
     /// 'ffai'|'mlx'`) or the name-derived op group (`--match-group softmax`).
-    fn matches(&self, name: &str, fallback_name: &str, family: &str) -> bool {
+    pub(crate) fn matches(&self, name: &str, fallback_name: &str, family: &str) -> bool {
         if let Some(f) = &self.filter {
             let f = f.to_ascii_lowercase();
             if !name.to_ascii_lowercase().contains(&f)
@@ -1344,7 +1363,7 @@ impl NameFilter {
 /// Kernel family of a registration site — the directory component below
 /// `src/` in the `file!()` path (`crates/metaltile-std/src/mlx/copy.rs` →
 /// `"mlx"`). Empty when the layout doesn't follow the family convention.
-fn kernel_family(file: &str) -> &str {
+pub(crate) fn kernel_family(file: &str) -> &str {
     let Some(pos) = file.find("/src/") else { return "" };
     let rest = &file[pos + "/src/".len()..];
     match rest.find('/') {

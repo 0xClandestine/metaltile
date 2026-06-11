@@ -89,6 +89,7 @@ pub fn run(args: &BenchArgs, harness: &crate::harness::Harness) -> Result<(), cr
         no_match_name: filter_args.no_match_name.clone(),
         match_group: filter_args.match_group.clone(),
         no_match_group: filter_args.no_match_group.clone(),
+        backend: args.backend.map(|b| b.as_runner_arg().to_string()),
         warmup_runs: Some(warmup_runs),
         runs: Some(runs),
         profile: verbose >= 1,
