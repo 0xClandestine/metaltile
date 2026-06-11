@@ -40,32 +40,44 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 // 1 function → 6 variants × 3 dtypes = 18 kernels, compiled for each backend.
 #[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
 pub fn dequant_gather<T>(
-    weight: Tensor<u32>, scales: Tensor<T>, biases: Tensor<T>,
-    indices: Tensor<u32>, out: Tensor<T>,
-    #[constexpr] hidden: u32, #[constexpr] group_size: u32,
+    weight: Tensor<u32>,
+    scales: Tensor<T>,
+    biases: Tensor<T>,
+    indices: Tensor<u32>,
+    out: Tensor<T>,
+    #[constexpr] hidden: u32,
+    #[constexpr] group_size: u32,
 ) {
-    let idx      = program_id::<0>();
-    let token    = idx / hidden;
-    let d        = idx - token * hidden;
+    let idx = program_id::<0>();
+    let token = idx / hidden;
+    let d = idx - token * hidden;
     let token_id = load(indices[token]);
 
-    let row_off  = token_id * (hidden * BITS / 32u32);
-    let bit_off  = d * BITS;
+    let groups_per_row = hidden / group_size;
+    let g = d / group_size;
+    let u32_per_row = hidden * BITS / 32u32;
+    let row_off = token_id * u32_per_row;
+
+    let bit_off = d * BITS;
     let word_idx = bit_off / 32u32;
     let bit_in_w = bit_off & 31u32;
-    let lo_bits  = select(32u32 - bit_in_w >= BITS, BITS, 32u32 - bit_in_w);
-    let spill    = BITS - lo_bits;
+
+    let bits_in_w0 = 32u32 - bit_in_w;
+    let lo_bits = select(bits_in_w0 >= BITS, BITS, bits_in_w0);
+    let spill = BITS - lo_bits;
 
     let w0 = load(weight[row_off + word_idx]);
-    let w1 = load(weight[row_off + select(spill > 0u32, word_idx + 1u32, word_idx)]);
-    let q  = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32)
-           | (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+    let w1_idx = select(spill > 0u32, word_idx + 1u32, word_idx);
+    let w1 = load(weight[row_off + w1_idx]);
 
-    let g     = d / group_size;
-    let gprow = hidden / group_size;
-    let scale = load(scales[token_id * gprow + g]).cast::<f32>();
-    let bias  = load(biases[token_id * gprow + g]).cast::<f32>();
-    store(out[idx], (q.cast::<f32>() * scale + bias).cast::<T>());
+    let lo = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32);
+    let hi = (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+    let q = lo | hi;
+
+    let scale = load(scales[token_id * groups_per_row + g]).cast::<f32>();
+    let bias = load(biases[token_id * groups_per_row + g]).cast::<f32>();
+    let w_real = q.cast::<f32>() * scale + bias;
+    store(out[idx], w_real.cast::<T>());
 }
 ```
 
