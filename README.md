@@ -34,7 +34,7 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 
 ## Getting Started
 
-**1. Write a kernel.** Annotate a generic Rust function with `#[kernel]` — MetalTile generates `f32`, `f16`, and `bfloat16` variants from a single definition, lowers them to each enabled GPU backend (MSL by default; CUDA / HIP / Vulkan opt-in), and registers it against its MLX reference. Use `#[kernel(variants(...))]` to stamp out N compile-time specialisations from one function — with tuple-row co-variation, `cross[...]` axes, named enum labels, and optional constexprs:
+**1. Write a kernel.** Annotate a Rust function with `#[kernel]` and MetalTile lowers it to every enabled GPU backend. `variants(...)` stamps out N compile-time specialisations — each with its own name, signature, and inventory entry — from a single function body:
 
 <table>
 <tr>
@@ -45,75 +45,83 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 <td>
 
 ```rust
-// Simple kernel — one definition, three dtype variants.
-#[kernel(bench(op = "unary", subop = "exp", …))]
-pub fn mt_exp<T>(a: Tensor<T>, out: Tensor<T>) {
-    let idx = program_id(0);
-    store(out[idx], exp(load(a[idx])));
-}
-
-// Variant kernel — 19 quant formats × 2 dilation modes = 38 kernels
-// from a single function body.
-#[kernel(variants(
-    // Tuple-row: (FMT, BITS, WT, ST) co-vary across 19 formats.
-    // Named labels produce readable suffixes (mxfp4, int8, …) and
-    // their 0-based integer value drives compile-time `if` dispatch.
-    (FMT,         BITS,  WT,  ST ) = [
-        (mxfp4,   4u32, u32, u8 ),
-        (nvfp4,   4u32, u32, u8 ),
-        // … 17 more rows …
-        (int8,    8u32, u8,  f32),
-    ],
-    // cross[…] multiplies every zip row by each value: 19 × 2 = 38.
-    DILATED = cross[audio, fishspeech],
-    suffix  = "{DILATED}_{FMT}",
-))]
-pub fn mt_conv1d_quant<T>(
-    input: Tensor<T>, weight: Tensor<WT>, scales: Tensor<ST>,
-    #[constexpr] k: u32,
-    // Stripped from the MSL signature for DILATED=audio variants.
-    #[constexpr(only_when = "DILATED == 1u32")] dilation: u32,
-    // Stripped for every format except nvfp4 (FMT == 1).
-    #[constexpr(only_when = "FMT == 1u32")] global: f32,
+// One body → 6 kernels: dequant_gather_int2 … dequant_gather_int8.
+// BITS is substituted at macro-expansion time; the three dtype variants
+// (f32 / f16 / bf16) are generated on top of each specialisation.
+#[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
+pub fn dequant_gather<T>(
+    weight:  Tensor<u32>,
+    scales:  Tensor<T>,
+    biases:  Tensor<T>,
+    indices: Tensor<u32>,
+    out:     Tensor<T>,
+    #[constexpr] hidden:     u32,
+    #[constexpr] group_size: u32,
 ) {
-    // Compile-time `if`: only one branch survives per variant.
-    let p = if DILATED == 0u32 { p0 + kx } else { p0 + kx * dilation };
-    …
+    let idx      = program_id::<0>();
+    let token    = idx / hidden;
+    let d        = idx - token * hidden;
+    let token_id = load(indices[token]);
+
+    let g        = d / group_size;
+    let row_off  = token_id * (hidden * BITS / 32u32);
+    let bit_off  = d * BITS;
+    let word_idx = bit_off / 32u32;
+    let bit_in_w = bit_off & 31u32;
+
+    let lo_bits  = select(32u32 - bit_in_w >= BITS, BITS, 32u32 - bit_in_w);
+    let spill    = BITS - lo_bits;
+    let w0       = load(weight[row_off + word_idx]);
+    let w1       = load(weight[row_off + select(spill > 0u32, word_idx + 1u32, word_idx)]);
+
+    let q        = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32)
+                 | (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
+
+    let gprow    = hidden / group_size;
+    let scale    = load(scales[token_id * gprow + g]).cast::<f32>();
+    let bias     = load(biases[token_id * gprow + g]).cast::<f32>();
+    store(out[idx], (q.cast::<f32>() * scale + bias).cast::<T>());
 }
-// → mt_conv1d_quant_audio_mxfp4 … mt_conv1d_quant_fishspeech_int8
 ```
 
 </td>
 <td>
 
 ```cpp
-// mt_exp — float specialisation
-kernel void mt_exp(
-    const device float *a [[buffer(0)]],
-    device float *out     [[buffer(1)]],
+// dequant_gather_int4 — BITS substituted as 4
+kernel void dequant_gather_int4(
+    const device uint  *weight  [[buffer(0)]],
+    const device float *scales  [[buffer(1)]],
+    const device float *biases  [[buffer(2)]],
+    const device uint  *indices [[buffer(3)]],
+    device float       *out     [[buffer(4)]],
+    constant uint      &hidden      [[buffer(5)]],
+    constant uint      &group_size  [[buffer(6)]],
     uint tid [[thread_position_in_grid]]
 ) {
-    out[tid] = exp(a[tid]);
+    uint token    = tid / hidden;
+    uint d        = tid - token * hidden;
+    uint token_id = indices[token];
+
+    uint g        = d / group_size;
+    uint row_off  = token_id * (hidden * 4 / 32);
+    uint bit_off  = d * 4;
+    uint word_idx = bit_off / 32;
+    uint bit_in_w = bit_off & 31;
+
+    uint lo_bits  = (32 - bit_in_w >= 4) ? 4 : 32 - bit_in_w;
+    uint spill    = 4 - lo_bits;
+    uint w0       = weight[row_off + word_idx];
+    uint w1       = weight[row_off + (spill > 0 ? word_idx + 1 : word_idx)];
+
+    uint q        = ((w0 >> bit_in_w) & ((1 << lo_bits) - 1))
+                  | ((w1 & ((1 << spill) - 1)) << lo_bits);
+
+    uint  gprow   = hidden / group_size;
+    float scale   = scales[token_id * gprow + g];
+    float bias    = biases[token_id * gprow + g];
+    out[tid]      = (float)q * scale + bias;
 }
-
-// mt_conv1d_quant_audio_mxfp4 — DILATED=0, dilation stripped
-kernel void mt_conv1d_quant_audio_mxfp4(
-    const device float  *input   [[buffer(0)]],
-    const device uint   *weight  [[buffer(1)]],
-    const device uchar  *scales  [[buffer(2)]],
-    constant uint &k             [[buffer(3)]],
-    constant uint &stride        [[buffer(4)]],
-    …
-    uint tid [[thread_position_in_grid]]
-) { … }
-
-// mt_conv1d_quant_fishspeech_nvfp4 — DILATED=1, global present
-kernel void mt_conv1d_quant_fishspeech_nvfp4(
-    …
-    constant uint  &dilation [[buffer(…)]],
-    constant float &global   [[buffer(…)]],
-    …
-) { … }
 ```
 
 </td>
