@@ -128,6 +128,33 @@ pub mod kernel_tests {
         )
     }
 
+    /// GPU-vs-GPU reference (`TestSetup::compare_against`, the harness's
+    /// ref_setup path): `mt_mul(a, b)` checked against `mt_div(a, 1/b)`
+    /// dispatched on the same device. `b` is power-of-two so the reciprocal
+    /// is exact and both kernels must round identically — any disagreement
+    /// is a dispatch/readback bug, not arithmetic. f32-only: the point is
+    /// exercising the two-dispatch path on every backend, not dtype
+    /// coverage.
+    #[test_kernel(dtypes = [f32], tol = [0.0])]
+    fn test_binary_mul_vs_div_twin(dt: DType) -> TestSetup {
+        let n = 512usize;
+        let a = ramp(17, 0.05, -0.4, n);
+        let b: Vec<f32> = (0..n).map(|i| [0.5f32, 1.0, 2.0, 4.0][i % 4]).collect();
+        let recip: Vec<f32> = b.iter().map(|&x| 1.0 / x).collect();
+        TestSetup::new(mt_mul::kernel_ir_for(dt))
+            .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+            .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
+            .input(TestBuffer::zeros("out", n, dt))
+            .grid_1d(n, 256)
+            .compare_against(
+                TestSetup::new(mt_div::kernel_ir_for(dt))
+                    .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
+                    .input(TestBuffer::from_vec("b", pack_f32(&recip, dt), dt))
+                    .input(TestBuffer::zeros("out", n, dt))
+                    .grid_1d(n, 256),
+            )
+    }
+
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-5, 1e-2, 1e-1])]
     fn test_binary_sub(dt: DType) -> TestSetup {
         bin(
