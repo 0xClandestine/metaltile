@@ -349,16 +349,18 @@ pub mod kernel_tests {
     // only lowers on one target).
     #[test]
     fn ssd_portable_kernels_codegen_all_backends() {
-        use metaltile_codegen::{
-            CudaGenerator,
-            GlslGenerator,
-            HipGenerator,
-            backend::CodegenBackend,
-            msl::{MslConfig, MslGenerator},
+        use metaltile::{
+            codegen::{
+                CudaGenerator,
+                GlslGenerator,
+                HipGenerator,
+                backend::CodegenBackend,
+                msl::{MslConfig, MslGenerator},
+            },
+            core::{DType, ir::KernelMode},
         };
-        use metaltile_core::{DType, ir::KernelMode};
 
-        let kernels: Vec<(&str, metaltile_core::Kernel)> = vec![
+        let kernels: Vec<(&str, metaltile::core::Kernel)> = vec![
             ("ffai_gemm_batched", {
                 let mut k = super::super::gemm::ffai_gemm_batched::kernel_ir_for(DType::F32);
                 k.mode = KernelMode::Reduction;

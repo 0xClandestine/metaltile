@@ -106,7 +106,13 @@ pub use metaltile_runtime::{
     compile_glsl_to_spv,
 };
 /// Runtime context, dispatch result, and top-level runtime error.
-pub use metaltile_runtime::{Context, DispatchResult, MetalTileError};
+pub use metaltile_runtime::{
+    Context,
+    DispatchResult,
+    DispatchSpec,
+    MetalTileError,
+    ResidentBuffer,
+};
 /// CUDA / NVIDIA device runtime entry points (feature `cuda`).
 #[cfg(feature = "cuda")]
 pub use metaltile_runtime::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};

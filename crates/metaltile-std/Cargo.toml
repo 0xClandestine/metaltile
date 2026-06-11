@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 # Run the registered #[test_kernel] corpus on the CUDA backend
-# (tests/cuda_kernel_corpus.rs). Forwards to metaltile-runtime/cuda.
+# (tests/cuda_kernel_corpus.rs). Forwards to the facade's cuda feature.
 cuda = ["metaltile/cuda"]
 # Run the registered #[test_kernel] corpus on the HIP / ROCm backend
 # (tests/hip_kernel_corpus.rs). Forwards to the facade's hip feature.
@@ -35,9 +35,3 @@ rustc-hash.workspace = true
 # AURA MSL snapshot tests (tests/aura_msl_snapshots.rs).
 insta.workspace = true
 bytemuck.workspace = true
-# GPU dispatch in probe / GPU-correctness integration tests.
-metaltile-runtime.workspace = true
-# CUDA corpus tests (tests/cuda_kernel_corpus.rs, tests/cuda_bench_corpus.rs)
-# name these crates directly for DType + CudaGenerator.
-metaltile-core.workspace = true
-metaltile-codegen.workspace = true

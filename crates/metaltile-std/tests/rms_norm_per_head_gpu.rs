@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_runtime::Context;
+use metaltile::Context;
 use metaltile_std::mlx::rms_norm::{mt_rms_norm, mt_rms_norm_small};
 
 fn cpu_rms_norm_reference(x: &[f32], w: &[f32], rows: usize, n: usize, eps: f32) -> Vec<f32> {

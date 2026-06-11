@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::{Dt, gpu_lock, pack_bytes, ramp, unpack_bytes};
-use metaltile_runtime::Context;
+use metaltile::Context;
 use metaltile_std::mlx::steel::attn::steel_attention_mma::mt_sdpa_prefill_mma;
 
 /// Naive SDPA prefill (single batch, full causal). Q/K/V are

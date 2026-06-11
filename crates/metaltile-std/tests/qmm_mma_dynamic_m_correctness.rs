@@ -32,8 +32,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::gpu_lock;
-use metaltile::core::dtype::DType;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::dtype::DType};
 use metaltile_std::mlx::quantized_mma_dynamic_m as dyn_m;
 
 // ── Triple-loop CPU oracle — bit-identical algorithm to ──────────────────

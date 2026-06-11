@@ -16,8 +16,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::moe_gather_gemv_iq2xxs::ffai_moe_gather_gemv_iq2xxs;
 
 const N_SLOTS: usize = 6;

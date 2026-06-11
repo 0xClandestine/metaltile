@@ -35,9 +35,7 @@
 
 use std::collections::BTreeMap;
 
-use metaltile::runner::BenchStats;
-use metaltile_core::dtype::DType;
-use metaltile_runtime::CudaDevice;
+use metaltile::{CudaDevice, core::dtype::DType, runner::BenchStats};
 
 /// Warmup launches (JIT/cache/clock ramp) before timing.
 const WARMUP: u32 = 5;
