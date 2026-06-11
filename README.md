@@ -105,6 +105,107 @@ The default table adds wall-clock latency (`MT(µs)`) and compute throughput
 
 Read the [docs](docs/) to learn more.
 
+## Kernel Variants
+
+`#[kernel(variants(...))]` stamps out N structurally-identical kernels that differ only in compile-time constants — without writing N separate functions. Each variant gets its own kernel name, MSL signature, and inventory entry.
+
+### Zip axes
+
+The baseline form: all zip axes must have the same length, and the macro zips them row-by-row to produce one variant per row.
+
+```rust
+#[kernel(variants(
+    BITS   = [2u32,  4u32,  8u32],
+    suffix = "int{BITS}",
+))]
+pub fn dequant<T>(weight: Tensor<T>, out: Tensor<T>, ...) {
+    // BITS is substituted at expansion time → three kernels:
+    //   dequant_int2, dequant_int4, dequant_int8
+}
+```
+
+### Tuple-row syntax
+
+When several axes always co-vary, write them as a single table instead of parallel lists. Each row is one variant:
+
+```rust
+#[kernel(variants(
+    (FMT,    BITS,  WT,  ST ) = [
+        (mxfp4,  4u32, u32, u8 ),
+        (nvfp4,  4u32, u32, u8 ),
+        (int8,   8u32, u8,  f32),
+        // … up to 19 rows
+    ],
+    suffix = "{FMT}",
+))]
+pub fn conv_quant<T>(weight: Tensor<WT>, scales: Tensor<ST>, ...) { … }
+// → conv_quant_mxfp4, conv_quant_nvfp4, conv_quant_int8, …
+```
+
+All axes defined in a tuple-row block are zipped together exactly like separate zip axes — they can be freely mixed with additional `IDENT = [...]` axes.
+
+### Named enum-style labels
+
+A bare identifier in a value list becomes a *named label*: its integer value is its 0-based position in the list, and the label name (not the integer) is used when that parameter appears in a suffix template.
+
+```rust
+VARIANT = [direct, dilated, transpose, depthwise]
+suffix  = "{VARIANT}"
+// → …_direct, …_dilated, …_transpose, …_depthwise
+// Inside the body: VARIANT == 0u32 means direct, == 1u32 means dilated, …
+```
+
+Named labels work inside compile-time `if` conditions using their auto-assigned integer value, keeping numeric dispatch logic readable without integer literals in the source.
+
+### `cross[...]` axis
+
+A cross axis multiplies every existing zip row by each of its values, producing `zip_count × cross_count` total variants. The zip rows are the inner loop; the cross values are the outer loop.
+
+```rust
+#[kernel(variants(
+    (FMT, BITS, WT, ST) = [
+        (mxfp4, 4u32, u32, u8),
+        // … 19 rows
+    ],
+    DILATED = cross[audio, fishspeech],  // 19 × 2 = 38 kernels
+    suffix  = "{DILATED}_{FMT}",
+))]
+pub fn mt_conv1d_quant<T>(…) { … }
+// → mt_conv1d_quant_audio_mxfp4, …, mt_conv1d_quant_fishspeech_int8
+```
+
+Multiple `cross[...]` axes are supported and multiply together.
+
+### Optional constexprs
+
+`#[constexpr(only_when = "EXPR")]` strips a `#[constexpr]` parameter from the MSL kernel signature entirely when `EXPR` evaluates to `false` for a given variant. The host does not need to provide a buffer slot for stripped params, and any reference to the param in the body is pruned by the compile-time `if` machinery.
+
+```rust
+pub fn mt_conv1d_quant<T>(
+    …
+    // Present only for fishspeech (DILATED=1) variants:
+    #[constexpr(only_when = "DILATED == 1u32")] dilation: u32,
+    // Present only for nvfp4 (FMT=1):
+    #[constexpr(only_when = "FMT == 1u32")] global: f32,
+) { … }
+```
+
+`EXPR` supports the same operators as compile-time `if` conditions: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, `+`, `-`, `*`, `/`, `%`, and parenthesised sub-expressions.
+
+### Compile-time `if`
+
+Any `if` inside a variants-expanded body whose condition contains **only** variant parameter names, integer literals, and the operators listed above is evaluated at macro-expansion time — the unused branch is stripped before the `#[kernel]` body parser runs.
+
+```rust
+let p = if DILATED == 0u32 { p0 + kx } else { p0 + kx * dilation };
+//       ^^^^^^^^^^^^^^^^^^^
+//       compile-time: only one branch survives per variant
+```
+
+An `if` condition that references any lowercase identifier (local variable, function name, type) is treated as a runtime `Op::If` and passed through unchanged.
+
+Read the [docs](docs/) to learn more.
+
 ## Architecture
 
 One `#[kernel]` DSL, four GPU backends. Your kernel lowers to a shared IR; the codegen passes optimise it once; then each backend emitter turns that IR into the target's native shader source. Two **peer hosts** consume the same kernels with no FFI between them — a Swift host (Metal/Apple, ships to the App Store) and the Rust host (`metaltile-runtime` + downstream engine crates).
