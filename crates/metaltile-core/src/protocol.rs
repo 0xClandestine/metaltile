@@ -202,6 +202,12 @@ pub enum ProtocolMessage {
 pub struct BenchResult {
     /// Kernel/bench name (e.g. `"unary/exp"`).
     pub name: String,
+    /// Kernel family the bench was defined under (the directory below
+    /// `src/`, e.g. `"ffai"` / `"mlx"`) — the unit the CI bench shards
+    /// select with `--match-group`. Empty when the source layout doesn't
+    /// follow the family convention.
+    #[serde(default)]
+    pub group: String,
     /// Data type (e.g. `"f16"`, `"f32"`).
     pub dtype: String,
     /// Human-readable shape label (e.g. `"N=1M f32"`). Empty string if not set.
@@ -261,6 +267,30 @@ pub struct BuildResult {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel-name helpers
+// ---------------------------------------------------------------------------
+
+/// Op group of a kernel name — the path component before `/`, else the name
+/// with any `mt_` prefix and dtype suffix stripped:
+/// - `"ffai/gemv"` → `"ffai"`
+/// - `"mt_softmax_f32"` → `"softmax"`
+/// - `"softmax"` → `"softmax"`
+///
+/// Shared by the CLI's filter flags and the runner's pre-dispatch filtering
+/// so `--match-group` means the same thing on both sides of the subprocess
+/// boundary.
+pub fn op_group(name: &str) -> &str {
+    if let Some(pos) = name.find('/') {
+        return &name[..pos];
+    }
+    let name = name.strip_prefix("mt_").unwrap_or(name);
+    name.strip_suffix("_f32")
+        .or_else(|| name.strip_suffix("_f16"))
+        .or_else(|| name.strip_suffix("_bf16"))
+        .unwrap_or(name)
+}
+
+// ---------------------------------------------------------------------------
 // Serialisation helpers
 // ---------------------------------------------------------------------------
 
@@ -288,9 +318,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn op_group_extraction() {
+        assert_eq!(op_group("ffai/gemv"), "ffai");
+        assert_eq!(op_group("mt_softmax_f32"), "softmax");
+        assert_eq!(op_group("mt_softmax_bf16"), "softmax");
+        assert_eq!(op_group("softmax"), "softmax");
+        assert_eq!(op_group("ffai_vector_add_f16"), "ffai_vector_add");
+    }
+
+    #[test]
     fn bench_result_roundtrip() {
         let msg = ProtocolMessage::BenchResult(BenchResult {
             name: "unary/exp".into(),
+            group: String::new(),
             dtype: "f16".into(),
             shape: "N=1M f16".into(),
             mt_gbps: 1234.5,
@@ -318,6 +358,7 @@ mod tests {
     fn bench_result_with_profile_roundtrip() {
         let msg = ProtocolMessage::BenchResult(BenchResult {
             name: "unary/exp".into(),
+            group: String::new(),
             dtype: "f32".into(),
             shape: "N=1M f32".into(),
             mt_gbps: 900.0,

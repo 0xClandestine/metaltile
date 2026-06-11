@@ -543,6 +543,69 @@ impl HipDevice {
         Ok(out)
     }
 
+    /// Prepare once, launch `warmup + iters` times, and return per-launch GPU
+    /// times in µs measured with `hipEvent` pairs (CUDA `bench_kernel` analog).
+    ///
+    /// No read-back: throughput is data-independent, and skipping the DtoH
+    /// copy keeps the timed region pure kernel execution. Outputs stay
+    /// resident (overwritten each iter — fine, we only time).
+    pub fn bench_kernel(
+        &self,
+        kernel: &Kernel,
+        buffers: &BTreeMap<String, Vec<u8>>,
+        grid: [u32; 3],
+        block: [u32; 3],
+        warmup: u32,
+        iters: u32,
+    ) -> Result<Vec<f64>, MetalTileError> {
+        let prep = self.prepare(kernel, buffers, block)?;
+        let mut args = prep.args();
+
+        // Warmup — first launch pays hipRTC/cache/clock-ramp costs.
+        for _ in 0..warmup {
+            self.launch(prep.func, grid, block, prep.shared_bytes, &mut args)?;
+        }
+
+        // Two events bracket each timed launch on the null stream — the
+        // same stream every `launch` rides.
+        let (mut start, mut stop): (hipEvent_t, hipEvent_t) = (ptr::null_mut(), ptr::null_mut());
+        hip_check(unsafe { hipEventCreate(&mut start) }, "hipEventCreate(start)")?;
+        hip_check(unsafe { hipEventCreate(&mut stop) }, "hipEventCreate(stop)")?;
+
+        // Closure owns its sample vec (returned on success) so no outer
+        // borrow outlives it — lets us unconditionally destroy events after.
+        let mut timed = || -> Result<Vec<f64>, MetalTileError> {
+            let mut samples = Vec::with_capacity(iters as usize);
+            for _ in 0..iters {
+                hip_check(
+                    unsafe { hipEventRecord(start, ptr::null_mut()) },
+                    "hipEventRecord(start)",
+                )?;
+                self.launch(prep.func, grid, block, prep.shared_bytes, &mut args)?;
+                hip_check(
+                    unsafe { hipEventRecord(stop, ptr::null_mut()) },
+                    "hipEventRecord(stop)",
+                )?;
+                hip_check(unsafe { hipEventSynchronize(stop) }, "hipEventSynchronize")?;
+                let mut ms: f32 = 0.0;
+                hip_check(
+                    unsafe { hipEventElapsedTime(&mut ms, start, stop) },
+                    "hipEventElapsedTime",
+                )?;
+                samples.push(ms as f64 * 1000.0); // ms → µs
+            }
+            Ok(samples)
+        };
+        let res = timed();
+
+        // Always destroy events, even on error.
+        unsafe {
+            hipEventDestroy(start);
+            hipEventDestroy(stop);
+        }
+        res
+    }
+
     pub fn synchronize(&self) -> Result<(), MetalTileError> {
         hip_check(unsafe { hipDeviceSynchronize() }, "hipDeviceSynchronize")
     }
