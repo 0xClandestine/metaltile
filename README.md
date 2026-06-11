@@ -34,20 +34,12 @@ For contributors building from source, see [Getting Started](docs/getting-starte
 
 ## Getting Started
 
-**1. Write a kernel.** Annotate a Rust function with `#[kernel]` and MetalTile lowers it to every enabled GPU backend. `variants(...)` stamps out N compile-time specialisations — each with its own name, signature, and inventory entry — from a single function body:
-
-<table>
-<tr>
-<th>Rust DSL — what you write</th>
-<th>Metal Shading Language — what you get</th>
-</tr>
-<tr>
-<td>
+**1. Write a kernel.** One `#[kernel]` definition lowers to MSL, CUDA, HIP, and SPIR-V. `variants(...)` stamps out compile-time specialisations at macro-expansion time — each with its own name, signature, and inventory entry — multiplied by the three dtype variants (`f32` / `f16` / `bf16`) the macro generates automatically:
 
 ```rust
-// One body → 6 kernels: dequant_gather_int2 … dequant_gather_int8.
-// BITS is substituted at macro-expansion time; the three dtype variants
-// (f32 / f16 / bf16) are generated on top of each specialisation.
+// 1 function → 6 bit-width variants × 3 dtypes = 18 kernels per backend.
+// BITS is substituted at macro-expansion time; unused bit-extract paths
+// constant-fold away in each specialisation.
 #[kernel(variants(BITS = [2, 3, 4, 5, 6, 8], suffix = "int{BITS}"))]
 pub fn dequant_gather<T>(
     weight:  Tensor<u32>,
@@ -73,60 +65,25 @@ pub fn dequant_gather<T>(
     let spill    = BITS - lo_bits;
     let w0       = load(weight[row_off + word_idx]);
     let w1       = load(weight[row_off + select(spill > 0u32, word_idx + 1u32, word_idx)]);
-
     let q        = (w0 >> bit_in_w) & ((1u32 << lo_bits) - 1u32)
                  | (w1 & ((1u32 << spill) - 1u32)) << lo_bits;
 
-    let gprow    = hidden / group_size;
-    let scale    = load(scales[token_id * gprow + g]).cast::<f32>();
-    let bias     = load(biases[token_id * gprow + g]).cast::<f32>();
+    let gprow = hidden / group_size;
+    let scale = load(scales[token_id * gprow + g]).cast::<f32>();
+    let bias  = load(biases[token_id * gprow + g]).cast::<f32>();
     store(out[idx], (q.cast::<f32>() * scale + bias).cast::<T>());
 }
 ```
 
-</td>
-<td>
-
-```cpp
-// dequant_gather_int4 — BITS substituted as 4
-kernel void dequant_gather_int4(
-    const device uint  *weight  [[buffer(0)]],
-    const device float *scales  [[buffer(1)]],
-    const device float *biases  [[buffer(2)]],
-    const device uint  *indices [[buffer(3)]],
-    device float       *out     [[buffer(4)]],
-    constant uint      &hidden      [[buffer(5)]],
-    constant uint      &group_size  [[buffer(6)]],
-    uint tid [[thread_position_in_grid]]
-) {
-    uint token    = tid / hidden;
-    uint d        = tid - token * hidden;
-    uint token_id = indices[token];
-
-    uint g        = d / group_size;
-    uint row_off  = token_id * (hidden * 4 / 32);
-    uint bit_off  = d * 4;
-    uint word_idx = bit_off / 32;
-    uint bit_in_w = bit_off & 31;
-
-    uint lo_bits  = (32 - bit_in_w >= 4) ? 4 : 32 - bit_in_w;
-    uint spill    = 4 - lo_bits;
-    uint w0       = weight[row_off + word_idx];
-    uint w1       = weight[row_off + (spill > 0 ? word_idx + 1 : word_idx)];
-
-    uint q        = ((w0 >> bit_in_w) & ((1 << lo_bits) - 1))
-                  | ((w1 & ((1 << spill) - 1)) << lo_bits);
-
-    uint  gprow   = hidden / group_size;
-    float scale   = scales[token_id * gprow + g];
-    float bias    = biases[token_id * gprow + g];
-    out[tid]      = (float)q * scale + bias;
-}
 ```
-
-</td>
-</tr>
-</table>
+// Generated kernels — compiled for every enabled backend (MSL · CUDA · HIP · SPIR-V):
+dequant_gather_int2  ·  dequant_gather_int2_f16  ·  dequant_gather_int2_bf16
+dequant_gather_int3  ·  dequant_gather_int3_f16  ·  dequant_gather_int3_bf16
+dequant_gather_int4  ·  dequant_gather_int4_f16  ·  dequant_gather_int4_bf16
+dequant_gather_int5  ·  dequant_gather_int5_f16  ·  dequant_gather_int5_bf16
+dequant_gather_int6  ·  dequant_gather_int6_f16  ·  dequant_gather_int6_bf16
+dequant_gather_int8  ·  dequant_gather_int8_f16  ·  dequant_gather_int8_bf16
+```
 
 **2. Install the CLI and run.**
 
