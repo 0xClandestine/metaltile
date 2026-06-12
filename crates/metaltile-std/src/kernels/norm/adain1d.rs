@@ -23,7 +23,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn adain1d<T>(
+pub fn mt_adain1d<T>(
     x: Tensor<T>,
     gamma: Tensor<T>,
     beta: Tensor<T>,
@@ -70,7 +70,7 @@ pub fn adain1d<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::adain1d;
+    use super::mt_adain1d;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn ramp(n: usize, period: usize, amp: f32, start: f32) -> Vec<f32> {
@@ -108,7 +108,7 @@ pub mod kernel_tests {
         let gamma = unpack_f32(&pack_f32(&gamma_f, dt), dt);
         let beta = unpack_f32(&pack_f32(&beta_f, dt), dt);
         let expected = naive_adain(&x, &gamma, &beta, rows, length, eps);
-        TestSetup::new(adain1d::kernel_ir_for(dt))
+        TestSetup::new(mt_adain1d::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x_f, dt), dt))
             .input(TestBuffer::from_vec("gamma", pack_f32(&gamma_f, dt), dt))
@@ -129,13 +129,13 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::adain1d;
+    use super::mt_adain1d;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_adain1d(dt: DType) -> BenchSetup {
         let (batch, channels, length) = (4usize, 512usize, 1024usize);
         let rows = batch * channels;
-        BenchSetup::new(adain1d::kernel_ir_for(dt))
+        BenchSetup::new(mt_adain1d::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("x", rows * length, dt))
             .buffer(BenchBuffer::random("gamma", rows, dt))

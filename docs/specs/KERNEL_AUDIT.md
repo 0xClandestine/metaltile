@@ -76,8 +76,8 @@ Local verification of NAX kernels is the developer's responsibility on M4+ hardw
 | scan (prefix sum/prod/max/min) | ✓ | ✓ | ✓ | `mlx/scan.rs` → `mt_scan<T>` + `mt_scan_exclusive<T>` (sum), `mt_scan_prod<T>` / `mt_scan_max<T>` / `mt_scan_min<T>` + exclusive variants. Sum pair uses hardware `simd_scan_exclusive`; the prod/max/min pairs use a `tgs[lsize]` threadgroup buffer for sequential cross-thread prefix reads. |
 | softmax | ✓ | ✓ | ✓ | `mlx/softmax.rs` → `mt_softmax<T>` (looped + single-row collapsed). |
 | logsumexp | ✓ | ✓ | ✓ | `mlx/logsumexp.rs` → `mt_logsumexp<T>`. |
-| layer_norm | ✓ | ✓ | ✓ | `mlx/layer_norm.rs` → `mt_layer_norm<T>`. |
-| rms_norm | ✓ | ✓ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm<T>` + `mt_rms_norm_small<T>` (2-elem/thread, small-head_dim per-head q_norm/k_norm) + `mt_rms_norm_wide<T>` (strided wide-row variant for `head_dim > 4096`, e.g. Gemma 4 31B hidden=5376). |
+| layer_norm | ✓ | ✓ | ✓ | `kernels/norm/layer_norm.rs` → `mt_layer_norm<T>`. |
+| rms_norm | ✓ | ✓ | ✓ | `kernels/norm/rms_norm.rs` → `mt_rms_norm<T>` + `mt_rms_norm_small<T>` (2-elem/thread, small-head_dim per-head q_norm/k_norm) + `mt_rms_norm_wide<T>` (strided wide-row variant for `head_dim > 4096`, e.g. Gemma 4 31B hidden=5376). |
 | rope (standard) | ✓ | ✓ | ✓ | `kernels/rope/base.rs` → `mt_rope`. |
 | rope (frequency-band scaled) | ✗ | ✗ | ✓ | `kernels/rope/rope_banded.rs` → `mt_rope_banded<T>`. Per-row `positions` tensor + row grid axis (decode = T=1, prefill = all tokens in one dispatch); generic dtype, optional frequency-band scaling (Llama-3 / Qwen). |
 | sdpa_vector (prefill / generic) | ✓ | ✓ | ✓ | `mlx/scaled_dot_product_attention.rs` → `mt_sdpa<T>`. Scalar SDPA for short sequences. |
@@ -132,16 +132,16 @@ Local verification of NAX kernels is the developer's responsibility on M4+ hardw
 | conv1d_causal_step (depthwise SSM conv stream) | ✗ | partial | ✓ | `ffai/ssm.rs` → `conv1d_causal_step<T>`. fp32 state recurrence. |
 | ssm_replay (sequential tape capture + replay) | ✗ | ✓ | ✓ | `ffai/ssm_replay.rs` → `ssm_step_record<T>` (SSD forward + dA/dBx tape) + `ssm_replay<T>` (re-fold first k entries). |
 | fused_gate_activation (silu/gelu × up gate) | ✗ | ✓ | ✓ | `mlx/fused_gate_activation.rs` → `mt_fused_gate_gelu` (gelu-tanh) + `mt_fused_gate_clipped_swiglu` (GPT-OSS: `[-7,7]` clamp, `sigmoid(1.702·g)` gate, `+1` up bias). The `silu` variant ships separately as `mlx/swiglu.rs`. |
-| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ | ✓ | `ffai/rms_norm_residual.rs` → `ffai_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`. ~90 saved dispatches/token on Gemma4-30. |
-| rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ | ✓ | `ffai/rms_norm_rope.rs` → `ffai_rms_norm_rope<T>`. Paired-layout RoPE; Q/K post-projection norm+rope in one dispatch. |
-| rms_norm_qgemv (RMSNorm + quantized GEMV fused) | ✗ | ✓ | ✓ | `ffai/rms_norm_qgemv.rs` → `ffai_rms_norm_qgemv<T>` (int4, one-row-per-TG correctness shape) + `ffai_rms_norm_qgemv_fast<T>` (int4, 8-row-per-TG perf path, PR #154) + `ffai_rms_norm_qgemv_int8_fast<T>` (int8, 8-row-per-TG, PR #157). |
+| rms_norm_residual (RMSNorm + residual add fused) | ✗ | ✓ | ✓ | `kernels/norm/rms_norm_residual.rs` → `mt_rms_norm_residual<T>`. Reduction-mode, `N = TPG*4`. ~90 saved dispatches/token on Gemma4-30. |
+| rms_norm_rope (RMSNorm + RoPE fused) | ✗ | ✓ | ✓ | `kernels/norm/rms_norm_rope.rs` → `mt_rms_norm_rope<T>`. Paired-layout RoPE; Q/K post-projection norm+rope in one dispatch. |
+| rms_norm_qgemv (RMSNorm + quantized GEMV fused) | ✗ | ✓ | ✓ | `kernels/norm/rms_norm_qgemv.rs` → `mt_rms_norm_qgemv<T>` (int4, one-row-per-TG correctness shape) + `mt_rms_norm_qgemv_fast<T>` (int4, 8-row-per-TG perf path, PR #154) + `mt_rms_norm_qgemv_int8_fast<T>` (int8, 8-row-per-TG, PR #157). |
 | batched_qkv_qgemv (Q/K/V 4-bit qGEMV → 1 dispatch) | ✗ | ✓ | ✓ | `ffai/batched_qkv_qgemv.rs` → `ffai_batched_qkv_qgemv<T>` (one-row-per-TG) + `ffai_batched_qkv_qgemv_fast<T>` (8-row-per-TG, GQA-guarded, PR #154). `program_id::<2>()` selects Q/K/V, output concatenated `[Q\|K\|V]`. |
 | kv_cache_update (raw bf16/fp16 single-token append) | ✗ | ✗ | ✓ | `ffai/kv_cache.rs` → `kv_cache_update<T>`. FFAI-only; raw cache append. |
 | kv_cache (affine-quant int4/int8/fp8 quantize + bulk dequant) | ~ | ~ | ✓ | `ffai/kv_cache.rs` — `quantize_kv` + `bulk_dequant_kv` for int4/int8. **fp8** (PR #157): `quantize_kv_fp8_{e4m3,e5m2}` + `bulk_dequant_kv_fp8_{e4m3,e5m2}`. Per-group amax → scale quantize, byte-shift extract + biased-exp decode. E4M3: mantissa_bits=3, e_bias=-6, max=448; E5M2: mantissa_bits=2, e_bias=-14, max=57344. Closes the host-side fp8 KV round-trip. |
 | sampling (softmax + categorical inverse-CDF) | ✗ | ✗ | ✓ | `ffai/sampling.rs` → `softmax_categorical_sample`. Companion to `ffai_argmax` for `T > 0` decode. |
 | logits processors (temperature, repetition penalty, top-k / top-p / min-p masks) | ✗ | ✗ | ✓ | `ffai/logits_{processors,topk,top_p,min_p}.rs` — in-place decode-form sampler stages composed before `softmax_categorical_sample`. FFAI-only. |
 | sdpa_decode + learned attention sink (GPT-OSS-20B) | ✗ | ~ | ✓ | `ffai/sdpa_decode.rs` `has_sink` / `sink_logit` constexprs. GPT-OSS-20B's per-head learned attention-sink logit folds into the cross-simdgroup softmax denominator on-GPU as a virtual key — removing the host-side post-hoc rescale that previously cost a CPU sync per attention layer. |
-| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✓ | `ffai/gated_rmsnorm.rs` → `ffai_gated_rmsnorm<T>`. Fused Qwen3.5 / 3.6 GDN post-step `out = w·rmsNorm(y)·silu(z)`; `y` arrives fp32 (the `gated_delta` recurrence output). Closes the per-GDN-layer host-side CPU sync (~75 % of Qwen3.5/3.6 layers). |
+| gated_rmsnorm (fp32-in gated RMSNorm → activation dtype) | ✗ | ✗ | ✓ | `kernels/norm/gated_rmsnorm.rs` → `mt_gated_rmsnorm<T>`. Fused Qwen3.5 / 3.6 GDN post-step `out = w·rmsNorm(y)·silu(z)`; `y` arrives fp32 (the `gated_delta` recurrence output). Closes the per-GDN-layer host-side CPU sync (~75 % of Qwen3.5/3.6 layers). |
 | conv2d (vision patch conv — im2col + tiled GEMM) | ✓ | ✓ | ✓ | `ffai/conv2d.rs` → `conv2d_patch14` / `conv2d_patch16` + `conv2d_generic`. NCHW input, OIHW weight; direct conv (implicit im2col, one thread per output). VLM front-end. |
 | patch_embed (fused image unfold + linear projection) | ✗ | ✗ | ✓ | `ffai/patch_embed.rs` → `patch_embed<T>`. Fused image-unfold + linear projection — gathers each patch's pixels and dots them with one weight row, no intermediate unfolded buffer. **MMA-tiled perf path** (PR #157): `ffai/patch_embed_mma.rs` → `patch_embed_mma<T>` — implicit-patch-unfold + 4-SG 2×2 simdgroup-matrix MMA (`hidden` and `num_patches` divisible by 32); targets ViT-L/H shapes. |
 | rope_2d (2D positional RoPE for vision tokens) | ✓ | ✓ | ✓ | `kernels/rope/rope_2d.rs` → `mt_rope_2d<T>`. 2D RoPE over a (row, col) token grid; head_dim split into row half + column half, each running rotate-half RoPE. VLM front-end. |
@@ -255,8 +255,8 @@ each family's proven dispatch geometry verbatim (no new freeze surface).
 | MoE gather-qmm | reduction | `mlx/block_scaled_moe.rs` | int3–8 |
 | MoE gather — MPP (bm8/16/64) | MPP | `ffai/moe_mpp{,_bm8,_bm64}_block_scaled.rs` | int4, int8 |
 | expert-indexed GEMV | reduction | `ffai/dequant_gemv_expert_indexed_block_scaled.rs` | int4 |
-| fused RMSNorm + GEMV | reduction | `ffai/rms_norm_block_scaled_qgemv.rs` | int4, int8-fast |
-| fused gated-RMSNorm + GEMV | reduction | `ffai/gated_rms_norm_block_scaled_qgemv.rs` | int4 |
+| fused RMSNorm + GEMV | reduction | `kernels/norm/rms_norm_block_scaled_qgemv.rs` | int4, int8-fast |
+| fused gated-RMSNorm + GEMV | reduction | `kernels/norm/gated_rms_norm_block_scaled_qgemv.rs` | int4 |
 | batched-Q/K/V qgemv + qmm | reduction | `ffai/batched_qkv_block_scaled_{qgemv,qmm}.rs` | int4, int8-fast |
 | batched-4 qgemv + qmm | reduction | `ffai/batched_4_block_scaled_{qgemv,qmm}.rs` | int4 |
 | embedding gather | elementwise | `ffai/dequant_gather_block_scaled.rs` | int3–8 |

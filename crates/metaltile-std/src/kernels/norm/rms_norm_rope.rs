@@ -35,7 +35,7 @@ use metaltile::kernel;
 
 /// Fused RMSNorm + paired-layout RoPE for one Q/K head per threadgroup.
 #[kernel]
-pub fn ffai_rms_norm_rope<T>(
+pub fn mt_rms_norm_rope<T>(
     x: Tensor<T>,
     w: Tensor<T>,
     inv_freqs: Tensor<f32>,
@@ -69,7 +69,7 @@ pub fn ffai_rms_norm_rope<T>(
     store(out[rs + lid + half], (normed_a * sin_t + normed_b * cos_t).cast::<T>());
 }
 
-/// New-syntax correctness for `ffai_rms_norm_rope` (Reduction mode, one
+/// New-syntax correctness for `mt_rms_norm_rope` (Reduction mode, one
 /// threadgroup per row, `tpg = axis_size/2` — `axis_size` a multiple of 64,
 /// `axis_size ≤ 2048`). Per-row oracle replays the whole-row RMSNorm scale,
 /// the per-row position `pos = offset + (row / n_heads) mod seq_len`, and the
@@ -77,7 +77,7 @@ pub fn ffai_rms_norm_rope<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_rms_norm_rope;
+    use super::mt_rms_norm_rope;
     use crate::utils::{pack_f32, unpack_f32};
 
     /// Small, deterministic inverse-frequency table (length `half`).
@@ -86,7 +86,7 @@ pub mod kernel_tests {
     }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 1e-2, 1e-1])]
-    fn test_ffai_rms_norm_rope(dt: DType) -> TestSetup {
+    fn test_mt_rms_norm_rope(dt: DType) -> TestSetup {
         let (axis, n_heads, seq_len, offset, eps) = (128usize, 4usize, 8usize, 5usize, 1e-5f32);
         let rows = n_heads * seq_len; // one batch
         let half = axis / 2;
@@ -111,7 +111,7 @@ pub mod kernel_tests {
                 expected[base + lid + half] = na * s + nb * c;
             }
         }
-        TestSetup::new(ffai_rms_norm_rope::kernel_ir_for(dt))
+        TestSetup::new(mt_rms_norm_rope::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x_raw, dt), dt))
             .input(TestBuffer::from_vec("w", pack_f32(&w_raw, dt), dt))
@@ -127,12 +127,12 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `ffai_rms_norm_rope` (fused RMSNorm + RoPE, one
+/// New-syntax benchmark for `mt_rms_norm_rope` (fused RMSNorm + RoPE, one
 /// `(batch, seq, head)` row per threadgroup, axis_size=128, tpg=64).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_rms_norm_rope;
+    use super::mt_rms_norm_rope;
 
     fn f32_bytes(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
@@ -143,7 +143,7 @@ pub mod kernel_benches {
         let half = axis / 2;
         let inv_freqs: Vec<f32> =
             (0..half).map(|i| 1.0 / 10000.0_f32.powf(i as f32 / half as f32)).collect();
-        BenchSetup::new(ffai_rms_norm_rope::kernel_ir_for(dt))
+        BenchSetup::new(mt_rms_norm_rope::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("x", rows * axis, dt))
             .buffer(BenchBuffer::random("w", axis, dt))

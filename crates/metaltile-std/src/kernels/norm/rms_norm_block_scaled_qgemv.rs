@@ -6,7 +6,7 @@
 //! integer family (int2/3/4/5/6 + MXINT2..6 + MXINT8).
 //!
 //! `y = qmatmul(rms_norm(x) · norm_weight, W_q)` in one dispatch — the int4
-//! fusion of `ffai/rms_norm_qgemv.rs` (`ffai_rms_norm_qgemv`, the simple
+//! fusion of `kernels/norm/rms_norm_qgemv.rs` (`mt_rms_norm_qgemv`, the simple
 //! one-row-per-TG variant) with the block-scaled weight decode of
 //! `mlx/block_scaled_matmul.rs`. The normalized activation never leaves
 //! registers between the RMSNorm reduce and the matvec.

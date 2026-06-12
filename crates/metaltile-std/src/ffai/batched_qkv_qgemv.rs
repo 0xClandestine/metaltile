@@ -20,7 +20,7 @@
 //! `[ceil(max(out_q,out_k,out_v)/8), 1, 3]`, TPG = 64 (2 simdgroups ×
 //! 32 lanes). Uses `mt_qmv`'s mask-without-shift trick + algebraic-split
 //! accumulator (`s*q_dot + b*xs`) — identical inner loop to
-//! `ffai_rms_norm_qgemv_fast` but without the RMSNorm phase.
+//! `mt_rms_norm_qgemv_fast` but without the RMSNorm phase.
 //! out_q, out_k, out_v must each be multiples of 8; in_dim must be a
 //! multiple of 512; group_size must be 64.
 //!
@@ -147,7 +147,7 @@ pub fn ffai_batched_qkv_qgemv<T>(
 /// `simd_id` selects the simdgroup (0 or 1); each simdgroup independently
 /// computes 4 output rows (row0..row3). Uses `mt_qmv`'s mask-without-shift
 /// trick + algebraic-split accumulator — identical inner loop to
-/// `ffai_rms_norm_qgemv_fast` but without the RMSNorm phase.
+/// `mt_rms_norm_qgemv_fast` but without the RMSNorm phase.
 ///
 /// Grid: `[ceil(max(out_q,out_k,out_v)/8), 1, 3]`.
 /// out_q, out_k, out_v must be multiples of 8; in_dim must be a multiple

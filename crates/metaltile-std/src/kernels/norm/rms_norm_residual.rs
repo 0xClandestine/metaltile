@@ -29,7 +29,7 @@ use metaltile::kernel;
 
 /// `out[r, i] = residual[r, i] + w[i] * x[r, i] * rsqrt(mean(x[r]²) + eps)`.
 #[kernel]
-pub fn ffai_rms_norm_residual<T>(
+pub fn mt_rms_norm_residual<T>(
     x: Tensor<T>,
     residual: Tensor<T>,
     w: Tensor<T>,
@@ -72,14 +72,14 @@ pub fn ffai_rms_norm_residual<T>(
     }
 }
 
-/// New-syntax correctness for `ffai_rms_norm_residual` (Reduction mode, one
+/// New-syntax correctness for `mt_rms_norm_residual` (Reduction mode, one
 /// threadgroup per row, `tpg = n/4` — `n` a multiple of 128, `n ≤ 4096`).
 /// Per-row oracle on dtype-rounded inputs: normalize `x` then add `residual`:
 /// `out_i = residual_i + x_i / sqrt(mean(x²) + eps) * w_i`.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_rms_norm_residual;
+    use super::mt_rms_norm_residual;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn setup(rows: usize, n: usize, dt: DType) -> TestSetup {
@@ -104,7 +104,7 @@ pub mod kernel_tests {
             x.extend_from_slice(&row);
             residual.extend_from_slice(&res);
         }
-        TestSetup::new(ffai_rms_norm_residual::kernel_ir_for(dt))
+        TestSetup::new(mt_rms_norm_residual::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("x", pack_f32(&x, dt), dt))
             .input(TestBuffer::from_vec("residual", pack_f32(&residual, dt), dt))
@@ -117,20 +117,20 @@ pub mod kernel_tests {
     }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 2e-2, 1e-1])]
-    fn test_ffai_rms_norm_residual(dt: DType) -> TestSetup { setup(4, 512, dt) }
+    fn test_mt_rms_norm_residual(dt: DType) -> TestSetup { setup(4, 512, dt) }
 }
 
-/// New-syntax benchmark for `ffai_rms_norm_residual` (fused RMSNorm + residual
+/// New-syntax benchmark for `mt_rms_norm_residual` (fused RMSNorm + residual
 /// add, hidden axis n=4096, tpg=1024 — the Apple TPG cap).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_rms_norm_residual;
+    use super::mt_rms_norm_residual;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rms_norm_residual(dt: DType) -> BenchSetup {
         let (rows, n) = (4096usize, 4096usize);
-        BenchSetup::new(ffai_rms_norm_residual::kernel_ir_for(dt))
+        BenchSetup::new(mt_rms_norm_residual::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("x", rows * n, dt))
             .buffer(BenchBuffer::random("residual", rows * n, dt))

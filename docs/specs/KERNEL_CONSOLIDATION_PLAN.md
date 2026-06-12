@@ -10,8 +10,10 @@ structure is and the order we get there**; [`STYLE_GUIDE.md`](../STYLE_GUIDE.md)
 owns **how an individual kernel/bench/test is written** in the target style.
 Where they overlap (naming, per-file shape), defer to the style guide.
 
-> **Status:** in progress. `convolution/` is the proven exemplar (done — see §4)
-> and `rope/` has landed. The remaining families migrate one-per-PR per §6.
+> **Status:** in progress. `convolution/` is the proven exemplar (done — see §4);
+> `rope/` and `norm/` have landed. The remaining families migrate one-per-PR per
+> §6. The `*_block_scaled_qgemv` format matrices moved with `norm/` but still
+> await the format-axis fold (§7) in a later pass.
 
 ## 1. Why
 
@@ -44,7 +46,7 @@ crates/metaltile-std/src/kernels/
               2pass/batched/sink) · multi(+d256/tree-mask) · prefill_mma · flash_quantized ·
               aura_flash · steel/attn
   moe/        moe orchestration · mpp(bm8/bm64 × int8) · bgemm/gemv(q2k/iq2xxs) · block_scaled_moe
-  norm/       rms_norm(+residual/rope/qgemv/gated) · layer_norm · adain1d
+  norm/       ✅ DONE — rms_norm(+residual/rope/qgemv/gated) · layer_norm · adain1d
   rope/       ✅ DONE — rope · rope_2d · rope_banded · rope_yarn · partial_rope
   convolution/ ✅ DONE — conv1d/2d/3d · depthwise · winograd · steel_conv (see §4)
   ssm/        ssm(_replay) · gated_delta(+wy/prep/chunk) · mamba pregate-rmsnorm
@@ -141,8 +143,8 @@ payoff last:
 
 | Wave | Families | Rationale | Payoff |
 |---|---|---|---|
-| ✅ done | `convolution/`, `rope/` | exemplar + first wave-1 family | 24k → ~1.6k |
-| 1 | `norm/`, `sampling/`, `ops/` | self-contained, mostly elementwise / few formats | small, sets the pattern |
+| ✅ done | `convolution/`, `rope/`, `norm/` | exemplar + wave-1 families | 24k → ~1.6k |
+| 1 | `sampling/`, `ops/` | self-contained, mostly elementwise / few formats | small, sets the pattern |
 | 2 | `gemm/`, `ssm/`, `audio/`, `vision/`, `kv_cache/` | moderate size, few cross-deps | medium |
 | 3 | `sdpa/`, `moe/`, **`quant/`** | hardest axes (head-dim d64..d512; bm8/bm64×int8; the 30-format matrix) — most of the ~150k LOC | the bulk |
 

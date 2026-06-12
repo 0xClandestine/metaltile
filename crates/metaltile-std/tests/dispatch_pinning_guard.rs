@@ -24,7 +24,7 @@ use metaltile::{
     Context,
     core::{dtype::DType, ir::KernelMode},
 };
-use metaltile_std::mlx::rms_norm::mt_rms_norm;
+use metaltile_std::kernels::norm::rms_norm::mt_rms_norm;
 
 /// Buffers for an `n`-wide single-row `mt_rms_norm` dispatch (constexpr `n`
 /// is passed as a 4-byte buffer, matching the harness's dispatch convention).

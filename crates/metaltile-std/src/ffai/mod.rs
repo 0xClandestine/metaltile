@@ -16,7 +16,6 @@
 //! counterpart lands in mainline at a future pin, the file moves to
 //! `mlx/`.
 
-pub mod adain1d;
 pub mod arg_reduce;
 pub mod attn_head_gate;
 pub mod aura_dequant_rotated;
@@ -62,9 +61,6 @@ pub mod gated_delta_prep;
 pub mod gated_delta_prep_chunk;
 pub mod gated_delta_replay;
 pub mod gated_delta_wy;
-pub mod gated_rms_norm_block_scaled_qgemv;
-pub mod gated_rms_norm_qgemv;
-pub mod gated_rmsnorm;
 pub mod gather;
 pub mod gelu_erf;
 pub mod gemm;
@@ -128,10 +124,6 @@ pub mod patch_embed_mma_block_scaled;
 pub mod patch_unfold_qwen;
 pub mod pos_emb_2d_add;
 pub mod resize_normalize;
-pub mod rms_norm_block_scaled_qgemv;
-pub mod rms_norm_qgemv;
-pub mod rms_norm_residual;
-pub mod rms_norm_rope;
 pub mod sampling;
 pub mod sdpa_bidirectional;
 pub mod sdpa_bidirectional_d128_relpos;
