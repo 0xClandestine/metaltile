@@ -107,7 +107,7 @@ pub mod kernel_tests {
 
     use super::ffai_rope_llama_many;
     use crate::{
-        ffai::rope_llama::kernel_tests::band_inv_freq,
+        kernels::rope::rope_llama::kernel_tests::band_inv_freq,
         utils::{pack_f32, unpack_f32},
     };
 

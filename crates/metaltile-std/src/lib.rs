@@ -7,6 +7,7 @@
 
 pub mod convolution;
 pub mod ffai;
+pub mod kernels;
 pub mod mlx;
 pub mod probe;
 pub mod quant;

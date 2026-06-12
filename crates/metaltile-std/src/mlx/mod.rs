@@ -49,7 +49,6 @@ pub mod quantized_nax_int8;
 pub mod random;
 pub mod reduce;
 pub mod rms_norm;
-pub mod rope;
 pub mod scaled_dot_product_attention;
 pub mod scan;
 pub mod scatter_axis;

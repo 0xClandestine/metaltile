@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile::{Context, core::ir::KernelMode};
-use metaltile_std::ffai::dsv4_partial_rope_rows::ffai_dsv4_partial_rope_rows;
+use metaltile_std::kernels::rope::dsv4_partial_rope_rows::ffai_dsv4_partial_rope_rows;
 
 #[test]
 fn partial_rope_rows_matches_per_token_oracle() {

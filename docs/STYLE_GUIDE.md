@@ -1,6 +1,15 @@
 # MetalTile Kernel Style Guide
 
-A practical reference for adding a new kernel to `metaltile-std`. Follow this guide to produce a kernel that is consistent with the rest of the library: correct, testable, benchmarkable, and maintainable.
+The authority on **how to write one kernel** in `metaltile-std` — file shape,
+naming, the `#[kernel(variants(...))]` axis, shared primitives, the CPU oracle,
+and the bench. Follow it to produce a kernel that is consistent with the rest of
+the library: correct, testable, benchmarkable, and maintainable. This is the
+target style the whole library is migrating toward.
+
+> **Companion:** [`KERNEL_CONSOLIDATION_PLAN.md`](specs/KERNEL_CONSOLIDATION_PLAN.md)
+> owns *where files go* (the `kernels/<family>/` layout) and the family-by-family
+> migration roadmap. This guide owns *how a kernel is written*. Where they
+> overlap (naming, the per-file shape), this guide is authoritative.
 
 ---
 
@@ -11,27 +20,34 @@ A practical reference for adding a new kernel to `metaltile-std`. Follow this gu
 3. [The kernel function](#3-the-kernel-function)
 4. [Dispatch modes and grid geometry](#4-dispatch-modes-and-grid-geometry)
 5. [Compile-time variants](#5-compile-time-variants)
-6. [Writing the CPU oracle and tests](#6-writing-the-cpu-oracle-and-tests)
-7. [Writing the bench](#7-writing-the-bench)
-8. [Registering the kernel](#8-registering-the-kernel)
-9. [DSL reference and known limitations](#9-dsl-reference-and-known-limitations)
-10. [Worked example: elementwise scale](#10-worked-example-elementwise-scale)
+6. [Shared primitives (cross-kernel calling)](#6-shared-primitives-cross-kernel-calling)
+7. [Writing the CPU oracle and tests](#7-writing-the-cpu-oracle-and-tests)
+8. [Writing the bench](#8-writing-the-bench)
+9. [Registering the kernel](#9-registering-the-kernel)
+10. [DSL reference and known limitations](#10-dsl-reference-and-known-limitations)
+11. [Worked example: elementwise scale](#11-worked-example-elementwise-scale)
 
 ---
 
 ## 1. Where does my kernel live?
 
+Kernels are grouped by **operation family** under `kernels/`, not by whether an
+upstream metal reference exists (that's a property of one optional bench, not of
+the kernel):
+
 ```
-crates/metaltile-std/src/
-  mlx/   ← MLX-mirrored kernels (a matching .metal source exists in the pinned MLX commit)
-  ffai/  ← FFAI / model-specific kernels (no mainline MLX counterpart yet)
+crates/metaltile-std/src/kernels/
+  ops/   core/gather/scatter/reduce/elementwise primitives
+  gemm/ sdpa/ moe/ norm/ rope/ conv/ ssm/ quant/ audio/ vision/ sampling/ kv_cache/
+  primitives.rs   cross-family decode/reduce ops inlined at codegen
 ```
 
-**Put the kernel in `mlx/`** if:
-- An MLX `.metal` source for this op exists at the pinned commit (see `build.rs` `MLX_COMMIT`), AND
-- You plan to wire a side-by-side reference comparison in the bench.
-
-**Put it in `ffai/`** otherwise. Kernels move from `ffai/` to `mlx/` once the MLX comparison is wired.
+Put the kernel in the folder for its **operation** (`rope_yarn` → `kernels/rope/`,
+`gemv` → `kernels/gemm/`). The quantized form of an op is *not* a separate
+family — it folds into the op's file as a format axis (see §5). See
+[`KERNEL_CONSOLIDATION_PLAN.md`](specs/KERNEL_CONSOLIDATION_PLAN.md) for the full
+family list and the migration state (the crate is mid-migration from the legacy
+`mlx/` + `ffai/` split).
 
 ---
 
@@ -83,7 +99,7 @@ pub mod kernel_benches {
     use metaltile::{bench, test::*};
     use super::mt_my_kernel;
 
-    #[bench(name = "mlx/my_op", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mt_my_kernel(dt: DType) -> BenchSetup { ... }
 }
 ```
@@ -105,10 +121,13 @@ The `//!` block at the top is the public documentation for the kernel. It must i
 
 | Pattern | Used for |
 |---|---|
-| `mt_<op>` | MLX-mirrored ops (`mt_softmax`, `mt_copy`) |
-| `mt_<op>_<variant>` | Named variant of an MLX op (`mt_rms_norm_small`) |
-| `ffai_<op>` | FFAI-specific ops (`ffai_rope_llama`) |
-| `mt_<family>_<variant>` | Variant families produced by `variants(...)` (`mt_hadamard_n64`) |
+| `mt_<op>` | The operation (`mt_softmax`, `mt_copy`, `mt_rope_llama`) |
+| `mt_<op>_<variant>` | A named variant (`mt_rms_norm_small`) |
+| `mt_<family>_<variant>` | Variant families from `variants(...)` (`mt_hadamard_n64`, `mt_int4_conv2d`) |
+
+**Name the operation, not the model or the source.** No model names
+(`kokoro` → `adain1d`/`lstm`), no `mlx`/`ffai` coupling in the name. `ffai_<op>`
+is a legacy prefix being phased toward `mt_<op>`; don't introduce new ones.
 
 ### Generic dtype parameter
 
@@ -256,7 +275,31 @@ If different variants need different test parameters (e.g. different `hidden` si
 
 ---
 
-## 6. Writing the CPU oracle and tests
+## 6. Shared primitives (cross-kernel calling)
+
+The single biggest LOC-reduction tool. A sub-expression that recurs across many kernels — a weight decode (E2M1 nibble, E8M0 scale, a straddle-aware N-bit unpack), a simdgroup reduction — is factored into its own `#[kernel]` and **called** from every kernel that needs it. `KernelInlinePass` inlines the call at codegen, so there is zero runtime overhead: it is exactly as fast as pasting the body inline, but written once.
+
+```rust
+// kernels/primitives.rs  (or quant/codec for the decode family)
+#[kernel]
+pub fn mt_decode_e2m1(nib: u32) -> f32 { /* 4-bit E2M1 codebook */ }
+
+#[kernel]
+pub fn mt_decode_e8m0(byte: u32) -> f32 { exp2(byte.cast::<f32>() - 127.0f32) }
+```
+
+```rust
+// In a quantized matmul/conv body — call instead of re-deriving:
+let nib   = (load(weight[w_pack + col / 8u32]) >> ((col % 8u32) * 4u32)) & 0xFu32;
+let scale = mt_decode_e8m0(load(scales[w_blk + col / block_size]).cast::<u32>());
+acc = acc + pix * (mt_decode_e2m1(nib) * scale);
+```
+
+Extract a primitive once it appears in **two or more** kernels. Keep primitives small and decode/reduce-focused. The host-side CPU oracle should call the *same* math (e.g. `quant::codec`) so the kernel and oracle can't drift apart.
+
+---
+
+## 7. Writing the CPU oracle and tests
 
 ### The oracle pattern
 
@@ -340,12 +383,12 @@ Name edge-case tests descriptively: `test_mt_softmax_large_values`, not `test_mt
 
 ---
 
-## 7. Writing the bench
+## 8. Writing the bench
 
 ### BenchSetup builder
 
 ```rust
-#[bench(name = "mlx/my_op", dtypes = [f32, f16, bf16])]
+#[bench(dtypes = [f32, f16, bf16])]
 fn bench_mt_my_kernel(dt: DType) -> BenchSetup {
     let n = 64 * 1024 * 1024usize;
     BenchSetup::new(mt_my_kernel::kernel_ir_for(dt))
@@ -358,27 +401,32 @@ fn bench_mt_my_kernel(dt: DType) -> BenchSetup {
 }
 ```
 
+### Bench name = function name
+
+`#[bench]` has **no `name` key** — the registered bench name is always the
+function name (for a `variants(...)` bench, the suffix-renamed name). So make the
+function name descriptive: `bench_mt_softmax`, `bench_mxfp4_conv2d`. Do not encode
+a `mlx/`/`ffai/` path in the name; the family is the folder, not the bench string.
+
 ### `bytes_moved`
 
 Report the **memory bandwidth** that the kernel's working set consumes. For elementwise ops: `(reads + writes) * n * sizeof(T)`. For reductions: include both the input stream and the (typically smaller) output. For matmuls: include packed weights, scales/biases, input, and output.
 
 Do **not** count the small `#[constexpr]` constant buffers.
 
-### Bench name
+### Adding a metal reference (optional)
 
-Use the MLX path for ops that have an MLX counterpart: `"mlx/softmax"`, `"mlx/affine/dequantize_int4"`. Use a descriptive `"ffai/<family>/<variant>"` path for FFAI-specific ops: `"ffai/aura_value_int4"`, `"ffai/moe/gather_qmm_b3"`.
-
-### Adding an MLX reference
-
-For `mlx/` kernels, add a `.with_reference(...)` block to enable side-by-side throughput and correctness comparison:
+A bench may carry an optional **metal reference** — a hand-written `.metal`
+comparator for side-by-side throughput + correctness. It is not tied to `mlx/`:
+any kernel can have one, and most have none. Add it with `.with_reference(...)`:
 
 ```rust
 .with_reference(
     RefKernel::new(
-        format!("looped_softmax_{tn}"),   // MLX kernel function name
+        format!("looped_softmax_{tn}"),   // reference kernel function name
         include_str!(concat!(env!("OUT_DIR"), "/metal/softmax.metal")),
     )
-    .buffer(BenchBuffer::zeros("inp", n, dt))   // MLX buffer order may differ from MT
+    .buffer(BenchBuffer::zeros("inp", n, dt))   // reference buffer order may differ
     .buffer(BenchBuffer::zeros("out", n, dt).output())
     .buffer(BenchBuffer::from_vec("axis_size", (n as u32).to_le_bytes().to_vec(), DType::U32))
     .grid(Grid::new_3d(rows as u32, 1, 1, [1024, 1, 1]))
@@ -386,16 +434,16 @@ For `mlx/` kernels, add a `.with_reference(...)` block to enable side-by-side th
 )
 ```
 
-Buffers **shared by name** (e.g. `"inp"`) are filled with the same random data as the MT kernel — the runner overwrites the placeholder. Buffers unique to the reference (like `"axis_size"`) are provided as separate `from_vec` entries.
+Buffers **shared by name** (e.g. `"inp"`) are filled with the same random data as the kernel — the runner overwrites the placeholder. Buffers unique to the reference (like `"axis_size"`) are provided as separate `from_vec` entries.
 
 ---
 
-## 8. Registering the kernel
+## 9. Registering the kernel
 
-After creating the file, declare it in the parent `mod.rs`:
+After creating the file, declare it in its family `mod.rs`:
 
 ```rust
-// crates/metaltile-std/src/mlx/mod.rs  (or ffai/mod.rs)
+// crates/metaltile-std/src/kernels/<family>/mod.rs
 pub mod my_kernel;
 ```
 
@@ -403,7 +451,7 @@ The `#[kernel]` / `#[bench]` / `#[test_kernel]` proc-macros automatically submit
 
 ---
 
-## 9. DSL reference and known limitations
+## 10. DSL reference and known limitations
 
 ### Built-in identifiers
 
@@ -475,7 +523,7 @@ Additional constraints:
 
 ---
 
-## 10. Worked example: elementwise scale
+## 11. Worked example: elementwise scale
 
 A complete, minimal kernel that multiplies every element of a tensor by a scalar constant. This is the "hello world" for the DSL.
 
@@ -528,7 +576,7 @@ pub mod kernel_benches {
 
     use super::mt_scale;
 
-    #[bench(name = "ffai/scale", dtypes = [f32, f16, bf16])]
+    #[bench(dtypes = [f32, f16, bf16])]
     fn bench_mt_scale(dt: DType) -> BenchSetup {
         let n = 64 * 1024 * 1024usize;
         BenchSetup::new(mt_scale::kernel_ir_for(dt))
@@ -541,7 +589,8 @@ pub mod kernel_benches {
 }
 ```
 
-After creating the file, add one line to `src/ffai/mod.rs`:
+After creating the file, add one line to its family `mod.rs` (e.g.
+`src/kernels/ops/mod.rs`):
 
 ```rust
 pub mod scale;
