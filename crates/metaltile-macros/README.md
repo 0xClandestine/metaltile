@@ -7,8 +7,9 @@ code.
 
 This crate is the front door of the MetalTile compiler: user-written
 `#[kernel]` functions enter here, and IR + dispatch surfaces exit. It
-also provides `shape!`/`tile!` constructors for shape annotations and
-`#[kernel(bench(...))]` for declarative benchmark registration.
+also provides `shape!`/`tile!` constructors for shape annotations,
+`#[kernel(variants(...))]` for compile-time specialisation, and the `#[bench]` /
+`#[test_kernel]` attributes for declarative bench / correctness-test registration.
 
 ## Position in the pipeline
 
@@ -66,10 +67,11 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 | Module | Purpose |
 |---|---|
 | `lib.rs` | All proc-macro entry points: `#[kernel]`, `#[constexpr]`, `#[scalar]`, `#[strided]`, `shape!`, `tile!`, `ValueRefs` / `OpFlags` derive macros |
-| `body_parser.rs` | `DslBodyParser` — walks `syn::Expr` trees and translates DSL calls into IR-building token streams |
-| `sig_parser.rs` | Signature parsing: `parse_kernel_params_generic`, `extract_constexprs_typed`, `extract_param_names` |
-| `bench_impl.rs` | `BenchArgs` parsing, `ClassKind` enum, `generate_submit` — used by `#[kernel(bench(...))]` |
-| `derive_op.rs` | Derive macros: `ValueRefs` (value-id traversal) and `OpFlags` (elementwise/side-effect/etc. predicates) |
+| `kernel/body.rs` | `DslBodyParser` — walks `syn::Expr` trees and translates DSL calls into IR-building token streams |
+| `kernel/sig.rs` | Signature parsing: `parse_kernel_params_generic`, `extract_constexprs_typed`, `extract_param_names` |
+| `kernel/variants.rs` | `#[kernel(variants(...))]` compile-time specialisation — stamps one kernel per parameter tuple (`VariantsSpec`, `substitute_fn`) |
+| `bench.rs` / `test.rs` | The `#[bench]` and `#[test_kernel]` attributes that register a bench/test setup into the `inventory` |
+| `derive/mod.rs` | Derive macros: `ValueRefs` (value-id traversal) and `OpFlags` (elementwise/side-effect/etc. predicates) |
 
 ## API reference
 
@@ -79,7 +81,8 @@ pub fn scale<T>(a: Tensor<T>, factor: f32, out: Tensor<T>) {
 |---|---|---|
 | `#[kernel]` | attribute | Parses a Rust function into IR + generates a module with `kernel_ir`, `kernel_ir_for`, `LaunchBuilder`, and `launch()` |
 | `#[autotune]` | attribute | Placed before `#[kernel]` to enable autotuning: `#[autotune(configs = [...], key = [M, N, K])]`. **Not yet implemented** — `AutotuneArgs` struct exists but parsing is a TODO in `expand_kernel`. |
-| `#[kernel(bench(...))]` | attribute | Registers a kernel for automatic benchmarking via `inventory::submit!`. Pass args inside `bench(...)` |
+| `#[kernel(variants(...))]` | attribute | Compile-time specialisation — stamps one kernel per parameter tuple (`variants(BITS = [2,4,8], suffix = "int{BITS}")`), constant-folding the values into the body. See the [Kernel Style Guide](../../docs/STYLE_GUIDE.md). |
+| `#[bench]` / `#[test_kernel]` | attribute | Register a kernel's throughput bench / GPU correctness test (and its setup callback) into the `inventory`. `#[bench(dtypes = [...])]`, `#[test_kernel(dtypes = [...], tol = [...])]`; both accept the same `variants(...)` syntax. |
 | `#[constexpr]` | attribute | Pass-through: marks a function parameter as a compile-time constant detected by `#[kernel]` |
 | `#[scalar]` | attribute | Pass-through: marks a `Tensor` parameter for `constant T&` lowering in MSL |
 | `#[strided]` | attribute | Pass-through: marks a `Tensor` parameter for strided lowering (shape + stride arrays emitted) |
@@ -137,29 +140,25 @@ Attributes placed on the function itself (before or alongside `#[kernel]`):
 | `#[scalar]` | Emits the parameter as `constant T& name` in MSL rather than `device T*`. Used for scalar values like `eps` or `scale`. |
 | `#[strided]` | Emits the parameter as `device T*` plus `constant uint* name_shape` and `constant uint* name_strides` in MSL. Used for non-contiguous tensor views. |
 
-### `#[kernel(bench(...))]` arguments
+### `#[bench]` / `#[test_kernel]`
 
-| Argument | Required | Purpose |
-|---|---|---|
-| `op` | yes | Bench table group, e.g. `"unary"`, `"binary"` |
-| `subop` | yes | Sub-operation label, e.g. `"exp"`, `"add"` |
-| `class` | yes | Dispatch class: `Unary`, `Binary`, `AllReduce`, `RowReduce`, `Arange`, `BinaryTwo`, `Select`, `RowNorm`, `Sort`, `Scan`, `ArgReduce`, `Random`, `FpQuantized`, `MatVec`, `MatVecMasked`, `QuantizedMatVec`, `Rope`, `Attention`, `StridedCopy` |
-| `tol` | yes | Maximum absolute correctness error, e.g. `1e-4` |
-| `input` | no | Input buffer init for unary: `Signed`, `Positive`, `Half`, `Unit` (default: `Half`) |
-| `input_a` / `input_b` | no | Input buffer init for binary (default: `Half`) |
-| `mlx` | no | MLX kernel name pattern; `{tn}` is replaced with the MLX type name |
-| `metal_file` | no | MLX reference .metal source path (loaded via `include_str!`) |
-| `dtypes` | no | `&'static [DType]` slice (default: `FLOAT_DTYPES`) |
-| `shapes` | no | Custom `ShapeSpec` array for complex dispatch shapes |
-| `start` / `step` | no | Arange start/step values (float literals) |
-| `reads` | no | Read count for bandwidth calculation (`RowNorm` class) |
-| `out_elements` | no | Output element count (`RowNorm` class; 1 = per-row scalar, >1 = full B×N) |
-| `tpg` | no | Threads per threadgroup override |
-| `pre_weight` / `pre_bias` / `post_eps` | no | RowNorm-specific: weight, bias, epsilon values |
-| `n` / `check_n` / `b` | no | Shape dimensions for complex dispatch (`RowNorm`, `Rope`) |
-| `h` / `l` / `d` / `n_per_group` | no | Rope-specific dimensions |
-| `group_size` | no | Quantization group size (`QuantizedMatVec` class) |
-| `m` / `pad` | no | StridedCopy dimensions |
+Benches and correctness tests are declared **next to the kernel** (in
+`kernel_benches` / `kernel_tests` modules) rather than via attribute arguments.
+Each attribute wraps a setup function that returns a builder:
+
+```rust,ignore
+#[bench(dtypes = [f32, f16, bf16])]
+fn bench_mt_scale(dt: DType) -> BenchSetup { /* BenchSetup::new(...).buffer(...).bytes_moved(...) */ }
+
+#[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-6, 1e-3, 1e-3])]
+fn test_mt_scale(dt: DType) -> TestSetup { /* TestSetup::new(...).input(...).expect(...) */ }
+```
+
+`dtypes` selects the float types to run; `tol` is the per-dtype absolute
+tolerance; both accept the same `variants(...)` syntax as `#[kernel]`. The bench
+name is the function name (there is no `name` key). A bench may attach an
+optional metal reference via `.with_reference(...)` on the `BenchSetup`. See the
+[Kernel Style Guide](../../docs/STYLE_GUIDE.md) for the full builder surface.
 
 ## Dependencies
 
@@ -185,7 +184,7 @@ Requires `[lib] proc-macro = true` in `Cargo.toml`.
 
 ## Extending
 
-- **New DSL intrinsic:** `src/body_parser.rs` — add a recognized function name to the
+- **New DSL intrinsic:** `src/kernel/body.rs` — add a recognized function name to the
   expression walker. Update the `Recognized call:` list in the module doc comment.
 
 - **New kernel parameter attribute:** `src/lib.rs` — add a new `#[proc_macro_attribute]`
@@ -196,10 +195,10 @@ Requires `[lib] proc-macro = true` in `Cargo.toml`.
   `#[proc_macro_attribute]` pass-through, parse its args in `expand_kernel`,
   and emit the corresponding token stream into the generated module.
 
-- **New bench class:** `src/bench_impl.rs` — add variant to `ClassKind` enum,
+- **New bench class:** `src/bench.rs` — add variant to `ClassKind` enum,
   add a match arm in `generate_submit` with its `ShapeSpec` and `BenchDispatch` variant.
 
-- **New bench argument:** `src/bench_impl.rs` — add field to `BenchArgs`, add parse
+- **New bench argument:** `src/bench.rs` — add field to `BenchArgs`, add parse
   arm in `BenchArgs::parse()`, consume in `generate_submit`.
 
 - **New shape/tile constructor syntax:** `src/lib.rs` — add a new `#[proc_macro]`

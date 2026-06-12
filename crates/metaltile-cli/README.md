@@ -80,12 +80,18 @@ tile inspect --help
 
 | Command | Purpose |
 |---|---|
-| `tile bench` | Run the full benchmark suite. MetalTile kernels run against MLX Metal kernel reference. Use `--filter <op>` to narrow. Outputs per-op throughput ratio and correctness. |
-| `tile build` | Compile all registered kernels to MSL and report any errors. Use `--emit msl,metallib,swift,ir,all -o <dir>` to write artifacts: `.metal` sources, `kernels.metallib`, `MetalTileKernels.swift` wrappers, and `manifest.json`. |
+| `tile bench` | Run the benchmark suite (latency, GFLOP/s, %-peak, bottleneck). `--filter <op>` to narrow; `--backend metal\|cuda\|hip\|vulkan` to pick a device; an optional metal reference runs side-by-side where a bench defines one. |
+| `tile test` | Run the `#[test_kernel]` GPU correctness suite — each kernel's output vs its CPU oracle within tolerance. `--filter` / `--backend` as above. |
+| `tile build` | Compile all registered kernels and report errors. Use `--emit msl,metallib,swift,ir,all -o <dir>` to write artifacts: `.metal` sources, `kernels.metallib`, `MetalTileKernels.swift` wrappers, and `manifest.json`. |
 | `tile inspect --kernel <name>` | Print the IR (SSA-form) and/or generated MSL for one kernel. Use `--ir` for IR only, `--msl` for MSL only. |
-| `tile device` | Show GPU device info: name, Metal feature set, supported language version, max threadgroup size. |
-| `tile snap -o <file>` | Save current benchmark results as a JSON regression baseline file. |
-| `tile diff <file>` | Compare current benchmark results to a saved baseline. Reports regressions (throughput drops below threshold). |
+| `tile device` | Show GPU device info: name, feature set, supported language version, max threadgroup size. |
+| `tile snap -o <file>` | Save current bench results as a JSON regression baseline file. |
+| `tile diff <file>` | Compare current bench results to a saved baseline. Reports regressions. |
+| `tile clean` | Remove build artifacts and cached baselines. |
+| `tile config` | Print the effective merged config (defaults → `tile.toml` → `TILE_*` env → flags). |
+| `tile init` | Scaffold a new MetalTile kernel project. |
+| `tile update` | Self-update the `tile` binary. |
+| `tile completions <shell>` | Generate shell completion scripts (bash / zsh / fish). |
 
 ### Installation
 

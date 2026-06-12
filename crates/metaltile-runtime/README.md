@@ -1,12 +1,16 @@
 # metaltile-runtime
 
-Apple Metal runtime dispatch for MetalTile GPU kernels.
-Manages Metal devices, compiles generated MSL into pipeline state objects,
-dispatches compute kernels, and returns output buffers to the host.
+GPU runtime dispatch for MetalTile kernels across backends. Compiles generated
+target source into pipeline state objects / modules, dispatches compute kernels,
+and returns output buffers to the host. **Metal (Apple) is the default**;
+`device/{cuda,hip,vulkan}/` add NVIDIA / AMD / portable devices behind the
+`cuda` / `hip` / `vulkan` Cargo features.
 
-This crate is the bottom of the MetalTile stack — it is the only crate
-that links against Apple's Metal framework, and all kernel execution
-ultimately flows through its `Context` type.
+This crate is the bottom of the MetalTile stack. It owns the device abstraction
+(`device/` — `metal_device.rs` plus the feature-gated cuda/hip/vulkan devices),
+the dispatch strategies (`dispatch/` — single, chained, buffer-plan, validate),
+and the compilation / PSO caches (`cache/`). Kernel execution flows through its
+per-backend `Context` / device types.
 
 ## Position in the pipeline
 

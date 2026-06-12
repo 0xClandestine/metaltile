@@ -1,13 +1,17 @@
 # metaltile
 
-Rust DSL for writing Apple Metal GPU kernels — write once, run fast on Apple Silicon.
-This is the user-facing facade crate: add `metaltile` to your `Cargo.toml`, import
-`metaltile::prelude::*`, annotate functions with `#[kernel]`, and dispatch them on
-the GPU with a few lines of Rust.
+Rust DSL for writing GPU kernels — write once, run fast. This is the user-facing
+facade crate: add `metaltile` to your `Cargo.toml`, import `metaltile::prelude::*`,
+annotate functions with `#[kernel]`, and dispatch them on the GPU with a few lines
+of Rust. Metal (Apple Silicon) is the default and most mature backend; CUDA, HIP,
+and Vulkan are feature-gated in the lower crates.
 
 The crate re-exports the compiler, runtime, and macro crates under one namespace so
 you never need to depend on `metaltile-core`, `metaltile-codegen`, or the others
-directly unless you are writing tooling or compiler extensions.
+directly unless you are writing tooling or compiler extensions. Beyond the
+re-exports it hosts `harness/` (the `#[kernel]` / `#[bench]` / `#[test_kernel]`
+registries) and `runner/` (the `__tile_runner` engine — `tile` runs GPU work in a
+spawned subprocess that streams results back as `ProtocolMessage` JSON lines).
 
 ## Position in the pipeline
 
