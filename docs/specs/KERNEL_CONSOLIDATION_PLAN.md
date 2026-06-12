@@ -11,9 +11,9 @@ owns **how an individual kernel/bench/test is written** in the target style.
 Where they overlap (naming, per-file shape), defer to the style guide.
 
 > **Status:** in progress. `convolution/` is the proven exemplar (done — see §4);
-> `rope/`, `norm/`, and `sampling/` have landed. The remaining families migrate
-> one-per-PR per §6. The `*_block_scaled_qgemv` format matrices moved with `norm/`
-> but still await the format-axis fold (§7) in a later pass.
+> all of wave 1 (`rope/`, `norm/`, `sampling/`, `ops/`) has landed. Wave 2/3
+> families migrate one-per-PR per §6. The `*_block_scaled_qgemv` format matrices
+> moved with `norm/` but still await the format-axis fold (§7) in a later pass.
 
 ## 1. Why
 
@@ -38,7 +38,7 @@ the FFAI emit path is unaffected).
 
 ```
 crates/metaltile-std/src/kernels/
-  ops/        elementwise/core primitives: binary · unary · ternary · copy · arange ·
+  ops/        ✅ DONE — elementwise/core primitives: binary · unary · ternary · copy · arange ·
               random · reduce · arg_reduce · scan · indexing · gather/scatter · hadamard ·
               fence · clamp · logsumexp · vector_add · axpy · strided
   gemm/       gemm · gemv(_masked) · batched-projection (qkv / 4) · patch_embed · steel/gemm
@@ -143,8 +143,7 @@ payoff last:
 
 | Wave | Families | Rationale | Payoff |
 |---|---|---|---|
-| ✅ done | `convolution/`, `rope/`, `norm/`, `sampling/` | exemplar + wave-1 families | 24k → ~1.6k |
-| 1 | `ops/` | self-contained, mostly elementwise / few formats | small, sets the pattern |
+| ✅ done | `convolution/`, `rope/`, `norm/`, `sampling/`, `ops/` | exemplar + all of wave 1 | 24k → ~1.6k |
 | 2 | `gemm/`, `ssm/`, `audio/`, `vision/`, `kv_cache/` | moderate size, few cross-deps | medium |
 | 3 | `sdpa/`, `moe/`, **`quant/`** | hardest axes (head-dim d64..d512; bm8/bm64×int8; the 30-format matrix) — most of the ~150k LOC | the bulk |
 

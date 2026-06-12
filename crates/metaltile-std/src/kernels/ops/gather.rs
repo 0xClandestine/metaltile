@@ -11,12 +11,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn ffai_gather<T>(
-    table: Tensor<T>,
-    indices: Tensor<u32>,
-    out: Tensor<T>,
-    #[constexpr] dim: u32,
-) {
+pub fn mt_gather<T>(table: Tensor<T>, indices: Tensor<u32>, out: Tensor<T>, #[constexpr] dim: u32) {
     let idx = program_id::<0>();
     let token = idx / dim;
     let d = idx - token * dim;
@@ -25,19 +20,19 @@ pub fn ffai_gather<T>(
     store(out[idx], load(table[src]));
 }
 
-/// New-syntax correctness for `ffai_gather` (Grid3D, one thread per output
+/// New-syntax correctness for `mt_gather` (Grid3D, one thread per output
 /// element). Pure copy — expected output is the gathered rows
 /// `out[token, d] = table[indices[token], d]`, exact (tol 0).
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_gather;
+    use super::mt_gather;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.0)]
-    fn test_ffai_gather(dt: DType) -> TestSetup {
+    fn test_mt_gather(dt: DType) -> TestSetup {
         let (vocab, dim, n_tokens) = (17usize, 8usize, 6usize);
         // table[r, d] = r * 1000 + d — a wrong token/dim decomposition
         // cross-contaminates immediately.
@@ -53,7 +48,7 @@ pub mod kernel_tests {
                 table_dt[indices[token] as usize * dim + d]
             })
             .collect();
-        TestSetup::new(ffai_gather::kernel_ir_for(dt))
+        TestSetup::new(mt_gather::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("table", pack_f32(&table, dt), dt))
             .input(TestBuffer::from_vec("indices", u32_bytes(&indices), DType::U32))
@@ -64,12 +59,12 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `ffai_gather` (embedding-table lookup, Qwen-class
+/// New-syntax benchmark for `mt_gather` (embedding-table lookup, Qwen-class
 /// dim, one thread per output element).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_gather;
+    use super::mt_gather;
 
     fn u32_bytes(v: impl Iterator<Item = u32>) -> Vec<u8> {
         v.flat_map(|x| x.to_le_bytes()).collect()
@@ -79,7 +74,7 @@ pub mod kernel_benches {
     fn bench_gather(dt: DType) -> BenchSetup {
         let (vocab, dim, n_tokens) = (8192usize, 4096usize, 1024usize);
         let n_elems = n_tokens * dim;
-        BenchSetup::new(ffai_gather::kernel_ir_for(dt))
+        BenchSetup::new(mt_gather::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("table", vocab * dim, dt))
             .buffer(BenchBuffer::from_vec(

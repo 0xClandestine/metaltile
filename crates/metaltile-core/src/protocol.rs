@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(op_group("mt_softmax_f32"), "softmax");
         assert_eq!(op_group("mt_softmax_bf16"), "softmax");
         assert_eq!(op_group("softmax"), "softmax");
-        assert_eq!(op_group("ffai_vector_add_f16"), "ffai_vector_add");
+        assert_eq!(op_group("mt_vector_add_f16"), "mt_vector_add");
     }
 
     #[test]

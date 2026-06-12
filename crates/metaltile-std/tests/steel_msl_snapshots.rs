@@ -32,11 +32,13 @@ use metaltile::{
     codegen::{MslGenerator, msl::MslConfig},
     core::{dtype::DType, ir::KernelMode},
 };
-use metaltile_std::mlx::{
-    fp_quantized_nax,
-    hadamard_m,
-    quantized_nax,
-    steel::gemm::{steel_gemm_fused_nax, steel_gemm_gather_nax, steel_gemm_splitk_nax},
+use metaltile_std::{
+    kernels::ops::hadamard_m,
+    mlx::{
+        fp_quantized_nax,
+        quantized_nax,
+        steel::gemm::{steel_gemm_fused_nax, steel_gemm_gather_nax, steel_gemm_splitk_nax},
+    },
 };
 
 /// Lower one of the NAX-family kernel IRs to MSL with its declared

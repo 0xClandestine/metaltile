@@ -1430,7 +1430,7 @@ mod name_filter_tests {
         }))
         .unwrap();
         // kernel name hit
-        assert!(nf.matches("ffai_vector_add_f32", "bench_add", ""));
+        assert!(nf.matches("mt_vector_add_f32", "bench_add", ""));
         // legacy bench-fn-ident hit
         assert!(nf.matches("some_other_kernel_f32", "bench_vector_add", ""));
         assert!(!nf.matches("mt_exp_f32", "bench_exp", ""));

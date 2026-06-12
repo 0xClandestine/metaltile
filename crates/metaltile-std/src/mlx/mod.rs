@@ -14,10 +14,6 @@
 //! expected to wire up eventually, it lives in `ffai/` until the
 //! comparison lands.
 
-pub mod arange;
-pub mod arg_reduce;
-pub mod binary;
-pub mod binary_two;
 pub mod block_scaled_dequant;
 pub mod block_scaled_matmul;
 pub mod block_scaled_mma;
@@ -26,37 +22,24 @@ pub mod block_scaled_qmm;
 pub mod block_scaled_qmm_mpp;
 pub mod block_scaled_qmm_nax;
 pub mod clamped_swiglu;
-pub mod copy;
 pub mod fft;
 pub mod fp_quantized;
 pub mod fp_quantized_mma;
 pub mod fp_quantized_nax;
 pub mod fused_gate_activation;
-pub mod gather_axis;
 pub mod gemv;
 pub mod gemv_masked;
-pub mod hadamard;
-pub mod hadamard_m;
-pub mod indexing;
-pub mod logsumexp;
 pub mod quantized;
 pub mod quantized_mma_dynamic_m;
 pub mod quantized_mpp;
 pub mod quantized_mpp_int8;
 pub mod quantized_nax;
 pub mod quantized_nax_int8;
-pub mod random;
-pub mod reduce;
 pub mod scaled_dot_product_attention;
-pub mod scan;
-pub mod scatter_axis;
 pub mod sdpa_vector;
 pub mod sgload_smoke;
 pub mod steel;
-pub mod strided;
 pub mod swiglu;
-pub mod ternary;
-pub mod unary;
 
 // `conv.rs` and `shared.rs` are placeholder/stale stubs left over from
 // the old `metaltile-bench` crate. They reference `crate::runner` which

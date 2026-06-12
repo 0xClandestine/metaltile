@@ -10,7 +10,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn ffai_vector_add<T>(a: Tensor<T>, b: Tensor<T>, mut out: Tensor<T>) {
+pub fn mt_vector_add<T>(a: Tensor<T>, b: Tensor<T>, mut out: Tensor<T>) {
     let i = tid;
     let av = load(a[i]).cast::<f32>();
     let bv = load(b[i]).cast::<f32>();
@@ -20,7 +20,7 @@ pub fn ffai_vector_add<T>(a: Tensor<T>, b: Tensor<T>, mut out: Tensor<T>) {
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_vector_add;
+    use super::mt_vector_add;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn setup(n: usize, dt: DType) -> TestSetup {
@@ -29,7 +29,7 @@ pub mod kernel_tests {
         let a_dt = unpack_f32(&pack_f32(&a, dt), dt);
         let b_dt = unpack_f32(&pack_f32(&b, dt), dt);
         let expected: Vec<f32> = a_dt.iter().zip(&b_dt).map(|(x, y)| x + y).collect();
-        TestSetup::new(ffai_vector_add::kernel_ir_for(dt))
+        TestSetup::new(mt_vector_add::kernel_ir_for(dt))
             .input(TestBuffer::from_vec("a", pack_f32(&a, dt), dt))
             .input(TestBuffer::from_vec("b", pack_f32(&b, dt), dt))
             .input(TestBuffer::zeros("out", n, dt))
@@ -47,12 +47,12 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_vector_add;
+    use super::mt_vector_add;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_add(dt: DType) -> BenchSetup {
         let n = 4096usize;
-        BenchSetup::new(ffai_vector_add::kernel_ir_for(dt))
+        BenchSetup::new(mt_vector_add::kernel_ir_for(dt))
             .buffer(BenchBuffer::random("a", n, dt))
             .buffer(BenchBuffer::random("b", n, dt))
             .buffer(BenchBuffer::zeros("out", n, dt).output())

@@ -27,7 +27,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn ffai_clamp_scalar<T>(input: Tensor<T>, out: Tensor<T>, lo: Tensor<f32>, hi: Tensor<f32>) {
+pub fn mt_clamp_scalar<T>(input: Tensor<T>, out: Tensor<T>, lo: Tensor<f32>, hi: Tensor<f32>) {
     let i = program_id::<0>();
     let lo_v = load(lo[0]);
     let hi_v = load(hi[0]);
@@ -39,12 +39,12 @@ pub fn ffai_clamp_scalar<T>(input: Tensor<T>, out: Tensor<T>, lo: Tensor<f32>, h
     store(out[i], clamped.cast::<T>());
 }
 
-/// New-syntax correctness for `ffai_clamp_scalar`. Grid3D, grid `[n,1,1]`,
+/// New-syntax correctness for `mt_clamp_scalar`. Grid3D, grid `[n,1,1]`,
 /// tpg `[1,1,1]`. Oracle clamps each element to `[lo, hi]`.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_clamp_scalar;
+    use super::mt_clamp_scalar;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn f32_bytes(v: f32) -> Vec<u8> { v.to_le_bytes().to_vec() }
@@ -58,7 +58,7 @@ pub mod kernel_tests {
         let input_f: Vec<f32> = (0..n).map(|i| (i as f32 - 128.0) * 0.1).collect();
         let input = unpack_f32(&pack_f32(&input_f, dt), dt);
         let exp: Vec<f32> = input.iter().map(|&x| x.max(lo).min(hi)).collect();
-        TestSetup::new(ffai_clamp_scalar::kernel_ir_for(dt))
+        TestSetup::new(mt_clamp_scalar::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("input", pack_f32(&input_f, dt), dt))
             .input(TestBuffer::from_vec("lo", f32_bytes(lo), DType::F32))
@@ -69,16 +69,16 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `ffai_clamp_scalar`.
+/// New-syntax benchmark for `mt_clamp_scalar`.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_clamp_scalar;
+    use super::mt_clamp_scalar;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_clamp_scalar(dt: DType) -> BenchSetup {
         let n = 576 * 768usize; // SigLIP patch-grid activation size
-        BenchSetup::new(ffai_clamp_scalar::kernel_ir_for(dt))
+        BenchSetup::new(mt_clamp_scalar::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("input", n, dt))
             .buffer(BenchBuffer::random("lo", 1, DType::F32))

@@ -16,7 +16,6 @@
 //! counterpart lands in mainline at a future pin, the file moves to
 //! `mlx/`.
 
-pub mod arg_reduce;
 pub mod attn_head_gate;
 pub mod aura_dequant_rotated;
 pub mod aura_encode;
@@ -26,7 +25,6 @@ pub mod aura_flash_sdpa;
 pub mod aura_score;
 pub mod aura_value;
 pub mod avg_pool2d_nhwc;
-pub mod axpy_scalar_inplace;
 pub mod batched_4_block_scaled_qgemv;
 pub mod batched_4_block_scaled_qmm;
 pub mod batched_4_qgemv;
@@ -35,7 +33,6 @@ pub mod batched_qkv_block_scaled_qgemv;
 pub mod batched_qkv_block_scaled_qmm;
 pub mod batched_qkv_qgemv;
 pub mod batched_qkv_qmm;
-pub mod clamp_scalar;
 pub mod dequant_gather;
 pub mod dequant_gather_block_scaled;
 pub mod dequant_gemv;
@@ -61,7 +58,6 @@ pub mod gated_delta_prep;
 pub mod gated_delta_prep_chunk;
 pub mod gated_delta_replay;
 pub mod gated_delta_wy;
-pub mod gather;
 pub mod gelu_erf;
 pub mod gemm;
 pub mod gemm_q4_mpp;
@@ -112,7 +108,6 @@ pub mod moe_mpp_int8;
 pub mod moe_mpp_shared;
 pub mod moe_router_sigmoid_bias;
 pub mod moe_router_sqrtsoftplus;
-pub mod mt_vector_add;
 pub mod patch_embed;
 pub mod patch_embed_block_scaled;
 pub mod patch_embed_mma;
