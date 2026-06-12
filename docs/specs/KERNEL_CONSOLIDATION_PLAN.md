@@ -120,11 +120,13 @@ Mechanics, per family:
 1. `git mv` the family's files into `kernels/<family>/`; update `lib.rs`
    (`pub mod kernels;`) and `kernels/mod.rs`.
 2. Merge fragmented 1-kernel files; extract shared primitives (tool 1).
-3. Collapse format/bit-width families onto `variants(...)` (tool 2); merge by op
-   (tool 3).
-4. Gate: `cargo build` + `tile test -f <family>` green + `make fmt`. **`pub fn`
-   names stay identical** → kernel inventory and FFAI emit are unaffected; MSL
-   output diffs only in whitespace/comments.
+3. Collapse format/bit-width/scale families onto `variants(...)` (tool 2); merge
+   by op (tool 3).
+4. Rename to `mt_<op>`, dropping the legacy `ffai_` / model-name prefixes
+   (§9.1); regenerate the FFAI emit consumer from the new inventory.
+5. Gate: `cargo build` + `tile test -f <family>` green + `make fmt`. The
+   *generated MSL per kernel* is unchanged — diffs are whitespace/comments and
+   the inventory-name rename.
 
 Order — by independence first (build the pattern on low-risk families), big
 payoff last:
@@ -152,24 +154,34 @@ k-quant paths, and the AURA codec stack. The target:
 - Codebook formats (`iq2_xxs`) and asymmetric super-block formats (q2_k) that
   don't fit the symmetric `element × scale` model keep their layout-specific
   decode in `codec`, still shared between kernel and oracle.
+- The **`f16`-scale variants are not separate kernels** — `ScaleKind` (F32 /
+  E8M0 / F16) is another axis of the format, so an op's `variants(...)` block
+  carries it alongside `FMT` and the `mt_*_f16` twins fold into the base op
+  (§9.3).
 
 ## 8. What this does NOT change
 
-- Generated MSL — identical post-consolidation (same IR, same passes).
-- Kernel inventory names — `variants(...)` suffix templates must reproduce the
-  existing `pub fn` names exactly, so the FFAI emit path and `tile build` are
-  unaffected.
+- Generated MSL per kernel — identical post-consolidation (same IR, same
+  passes); `variants(...)` suffix templates reproduce each body exactly.
 - `metaltile-core` / `-codegen` / `-runtime` / `-cli` — zero changes; this is a
   `metaltile-std` source reorg only.
 
-## 9. Open questions
+(Inventory *names* do change where the `ffai_`/model prefix is dropped, §9.1 —
+the FFAI emit consumer is regenerated to match, so this is not a breaking change.)
 
-1. **`ffai_<op>` prefix:** phase every `ffai_X` `pub fn` to `mt_X`, or leave the
-   prefix (a rename touches the FFAI emit consumer)? Plan currently *keeps* names
-   to stay emit-safe and renames opportunistically.
-2. **`vision/` + `audio/`** as their own folders, or distribute their ops into
-   `conv/` / `norm/` / `ops/`? Plan keeps thin folders; revisit once populated.
-3. **`f16`-scale twins** (`mt_nvfp8_f16_*`): permanent, or do they become a scale
-   axis of the format once `variants` carries a `ScaleKind`?
-4. **Metal references:** which kernels keep an optional `.with_reference(...)`
-   comparator, and for how long?
+## 9. Decisions
+
+1. **Drop the `ffai_` / model-name prefixes → `mt_<op>`.** Rename every kernel to
+   its operation name (`ffai_rope_llama` → `mt_rope_llama`, `dsv4_partial_rope` →
+   `mt_partial_rope`). Names are **not** pinned — the FFAI emit consumer is
+   regenerated from the new inventory, so the rename is safe. Applied per family
+   as part of its migration pass (§6).
+2. **Keep `vision/` and `audio/`** as their own folders for now — do not
+   distribute their ops into `conv/` / `norm/` / `ops/`.
+3. **`f16`-scale twins become a scale axis.** `ScaleKind` (F32 / E8M0 / F16) is an
+   axis of the *format*, carried by `variants(...)`; `mt_*_f16` kernels collapse
+   into their base op rather than existing as separate files (§7).
+4. **Metal references stay on the kernels that mirror them, indefinitely.** Any
+   kernel that is the same op / functionality as an upstream (MLX) reference keeps
+   its optional `.with_reference(...)` comparator; kernels with no upstream
+   counterpart carry none.

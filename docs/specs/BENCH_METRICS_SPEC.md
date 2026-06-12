@@ -1,10 +1,9 @@
 # Bench Metrics & Kernel-Optimization Spec
 
-**Status:** ✅ Implemented (Phases 1–4: latency µs, GFLOP/s, roofline %-of-peak +
+- **Status:** ✅ Implemented (Phases 1–4: latency µs, GFLOP/s, roofline %-of-peak +
 arithmetic intensity, and the bottleneck verdict). Precision roadmap (Appendix B)
 is tracked separately.
-**Captured:** 2026-05-31
-**Context:** follow-up to the MLX A/B comparison work on `ek/delete-legacy-gpu-tests` (PR #240)
+- **Captured:** 2026-05-31
 
 ---
 
@@ -35,7 +34,7 @@ GB/s alone can't tell you the int4 path is *fastest* (¼ the bytes), nor that th
 - **Additive only** — do not remove or change the existing GB/s / ref-vs-MT / correctness columns or the JSON fields already consumed by `baselines/*.json` diffing.
 
 **Non-goals (this spec)**
-- Implementing new precisions/kernels (see Appendix B roadmap).
+- Implementing new precisions/kernels (now implemented, see Appendix B roadmap).
 - Changing the A/B correctness mechanism (only adding perf metrics).
 
 ## 3. Current state (what already exists)
@@ -106,7 +105,7 @@ Test each phase: unit-test the metric math (latency→µs, gflops, %peak, AI) wi
 2. **int8 gemv under-optimization** — `qmv_b8` hits ~60 GB/s vs int4 `qmv`'s ~380 GB/s on M1 Max. Likely a kernel/codegen inefficiency, not a precision law. Investigate once the latency/%-peak metrics (Phase 1/3) make it measurable.
 3. **Widen f32-only tests** — several `#[test_kernel(dtypes=[f32])]` are on *generic `<T>`* kernels (`fft`, `softmax`, `logsumexp`, …) whose kernels already support f16/bf16; widen the tests. Genuinely-typed exceptions (`mt_fp4_quant_dequant` f32, `mt_random_hash` u32) stay as-is.
 
-## Appendix B — Precision-support roadmap (separate, larger effort)
+## Appendix B — Precision-support roadmap (separate, larger effort, now complete ✅)
 
 Goal: **support all precisions in every weight-bearing kernel** (matmul/gemv/attention/moe) so a bench reveals the fastest, and **properly support nvfp4 / mxfp4 / mxfp8** (today we have E2M1 fp4 with a *float* scale — good accuracy, but not spec-conformant and not interoperable with real checkpoints).
 
@@ -211,8 +210,8 @@ The M5/A19 added a per-GPU-core **Neural Accelerator** — Apple's first dedicat
 - ✅ **INT8** (INT32 accumulate) — accelerated but **lags FP16** (opposite of NVIDIA)
 - ✅ FP32 (general SIMD pipe, not the NA)
 - ❌ **bfloat16 — not accelerated** on first-gen NA
-- ❌ **fp8 / fp4 — not supported**
+- ❌ **fp8 / fp4 — not supported** (will be supported on Metal 4.1 on hardware that supports it)
 
-Implications for the roadmap: on M5, **fp16 is the fastest compute precision**; int8 helps memory-bound decode (bandwidth) but not compute; **bf16 may be slower than fp16** for matmul; fp4/fp8 elements get no native acceleration (dequantize-to-fp16 for the NA). The roofline device-spec table (§4.3) carries the SIMD (`peak_f32`/`peak_f16`), the M5+ GPU-Neural-Accelerator (`na_f16_tflops`), and the standalone-ANE (`ane_tops`, M1–M4 — for the upcoming ANE kernels/benches) ceilings.
+Implications for the roadmap: on M5, **fp16 is the fastest compute precision**; int8 helps memory-bound decode (bandwidth) but not compute; **bf16 may be slower than fp16** for matmul; fp4/fp8 elements do not have native acceleration until Metal 4.1 (dequantize-to-fp16 for the NA). The roofline device-spec table (§4.3) carries the SIMD (`peak_f32`/`peak_f16`), the M5+ GPU-Neural-Accelerator (`na_f16_tflops`), and the standalone-ANE (`ane_tops`, M1–M4 — for the upcoming ANE kernels/benches) ceilings.
 
 Sources: [Apple Developer — Accelerate ML with M5 & A19 GPUs](https://developer.apple.com/videos/play/tech-talks/111432/) · [Investigating the GPU Neural Accelerators on A19/M5 (tzakharko)](https://tzakharko.github.io/apple-neural-accelerators-benchmark/) · [TechBoards — A19/M5 GPU Neural Accelerators](https://techboards.net/threads/apple-a19-m5-gpu-neural-accelerators.5297/)
