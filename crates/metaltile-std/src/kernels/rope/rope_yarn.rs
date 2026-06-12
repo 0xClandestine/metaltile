@@ -22,7 +22,7 @@
 //! checkpoint's `mscale == mscale_all_dim` (the common case, including
 //! Nemotron-Labs-Diffusion).
 //!
-//! Same Grid3D dispatch shape as `ffai_rope_llama`: one thread per
+//! Same Grid3D dispatch shape as `mt_rope_llama`: one thread per
 //! (head, i in 0..head_dim/2), each thread rotating the pair
 //! (i, i + half_dim). No reduction, no threadgroup memory.
 //!
@@ -32,7 +32,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn ffai_rope_yarn<T>(
+pub fn mt_rope_yarn<T>(
     qk: Tensor<T>,
     out: Tensor<T>,
     #[constexpr] head_dim: u32,
@@ -73,13 +73,13 @@ pub fn ffai_rope_yarn<T>(
     store(out[i2], o2.cast::<T>());
 }
 
-/// New-syntax correctness + bench for `ffai_rope_yarn` (YaRN context-extension
+/// New-syntax correctness + bench for `mt_rope_yarn` (YaRN context-extension
 /// RoPE). Grid3D, grid `[n_heads, half_dim, 1]`, tpg `[1,1,1]`. Oracle replays
 /// the extrapolation/interpolation ramp + attn_factor scaling in f32.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_rope_yarn;
+    use super::mt_rope_yarn;
     use crate::utils::{pack_f32, unpack_f32};
 
     #[allow(clippy::too_many_arguments)]
@@ -113,7 +113,7 @@ pub mod kernel_tests {
                 exp[base + i + half] = x1 * s + x2 * c;
             }
         }
-        TestSetup::new(ffai_rope_yarn::kernel_ir_for(dt))
+        TestSetup::new(mt_rope_yarn::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("qk", pack_f32(&qk_f, dt), dt))
             .input(TestBuffer::zeros("out", n_heads * head_dim, dt))
@@ -144,17 +144,17 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `ffai_rope_yarn`.
+/// New-syntax benchmark for `mt_rope_yarn`.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_rope_yarn;
+    use super::mt_rope_yarn;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_yarn(dt: DType) -> BenchSetup {
         let (n_heads, head_dim) = (32usize, 128usize);
         let half = head_dim / 2;
-        BenchSetup::new(ffai_rope_yarn::kernel_ir_for(dt))
+        BenchSetup::new(mt_rope_yarn::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("qk", n_heads * head_dim, dt))
             .buffer(BenchBuffer::zeros("out", n_heads * head_dim, dt).output())

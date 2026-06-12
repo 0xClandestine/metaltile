@@ -44,7 +44,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn ffai_rope_2d<T>(
+pub fn mt_rope_2d<T>(
     qk: Tensor<T>,
     positions: Tensor<u32>,
     out: Tensor<T>,
@@ -90,14 +90,14 @@ pub fn ffai_rope_2d<T>(
     store(out[c2], (xc1 * sin_c + xc2 * cos_c).cast::<T>());
 }
 
-/// New-syntax correctness + bench for `ffai_rope_2d` (vision 2D positional
+/// New-syntax correctness + bench for `mt_rope_2d` (vision 2D positional
 /// RoPE). Grid3D, grid `[n_tokens, n_heads, quarter_dim]`, tpg `[1,1,1]`.
 /// Oracle rotates the row-half by the token's row position and the col-half by
 /// its col position.
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::ffai_rope_2d;
+    use super::mt_rope_2d;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
@@ -131,7 +131,7 @@ pub mod kernel_tests {
                 }
             }
         }
-        TestSetup::new(ffai_rope_2d::kernel_ir_for(dt))
+        TestSetup::new(mt_rope_2d::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("qk", pack_f32(&qk_f, dt), dt))
             .input(TestBuffer::from_vec("positions", u32_bytes(&positions), DType::U32))
@@ -146,18 +146,18 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `ffai_rope_2d`.
+/// New-syntax benchmark for `mt_rope_2d`.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::ffai_rope_2d;
+    use super::mt_rope_2d;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_rope_2d(dt: DType) -> BenchSetup {
         let (n_tokens, n_heads, head_dim) = (1024usize, 16usize, 64usize);
         let half = head_dim / 2;
         let quarter = head_dim / 4;
-        BenchSetup::new(ffai_rope_2d::kernel_ir_for(dt))
+        BenchSetup::new(mt_rope_2d::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("qk", n_tokens * n_heads * head_dim, dt))
             .buffer(BenchBuffer::random("positions", n_tokens * 2, DType::U32))

@@ -9,7 +9,7 @@
 //! `kv_cache_update` once per token (T dispatches × N attention layers,
 //! ×2 for the K+V pair); this kernel collapses that to ONE dispatch per
 //! (layer, K-or-V buffer). Same dispatch-saving pattern as
-//! `rope_llama_many` — see that file's docstring for the broader
+//! `mt_rope_llama_many` — see that file's docstring for the broader
 //! prefill-time motivation.
 //!
 //! Layout:
@@ -62,7 +62,7 @@ pub fn kv_cache_update_many<T>(
     let in_row = idx - r * n_kv_heads_x_head_dim;
     let h = in_row / head_dim;
     let d = in_row - h * head_dim;
-    // Per-row position lookup — same shape as `rope_llama_many`.
+    // Per-row position lookup — same shape as `mt_rope_llama_many`.
     let position = load(positions[r]);
     // Cache layout: [n_kv_heads, max_seq, head_dim]. Each row r writes
     // into out[h, positions[r], d] for its own h and d.

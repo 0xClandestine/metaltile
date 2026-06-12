@@ -1,6 +1,6 @@
 //! Copyright 2026 TheTom
 //! SPDX-License-Identifier: Apache-2.0
-//! Batched partial RoPE (ffai_dsv4_partial_rope_rows) must equal the per-token
+//! Batched partial RoPE (mt_partial_rope_rows) must equal the per-token
 //! reference (token t roped at position t). NO model load.
 #![cfg(target_os = "macos")]
 
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
 use metaltile::{Context, core::ir::KernelMode};
-use metaltile_std::kernels::rope::dsv4_partial_rope_rows::ffai_dsv4_partial_rope_rows;
+use metaltile_std::kernels::rope::partial_rope::mt_partial_rope_rows;
 
 #[test]
 fn partial_rope_rows_matches_per_token_oracle() {
@@ -68,7 +68,7 @@ fn partial_rope_rows_matches_per_token_oracle() {
     buffers.insert("corr_high".into(), 0.0f32.to_le_bytes().to_vec());
 
     let ctx = Context::new().unwrap();
-    let mut k = ffai_dsv4_partial_rope_rows::kernel_ir_for(Dt::F32.to_dtype());
+    let mut k = mt_partial_rope_rows::kernel_ir_for(Dt::F32.to_dtype());
     k.mode = KernelMode::Grid3D;
     let r = ctx
         .dispatch_with_grid(&k, &buffers, &BTreeMap::new(), [n_heads, half_rot, n_tokens], [

@@ -1,7 +1,7 @@
 //! Token-major ↔ head-major transpose for vision / audio attention.
 //!
 //! A vision (or audio) tower's attention stage-1 — per-head RMSNorm plus
-//! `ffai_rope_2d` — emits Q/K/V in **token-major** layout
+//! `mt_rope_2d` — emits Q/K/V in **token-major** layout
 //! `[n_tokens, n_heads, head_dim]` (one contiguous head block per token).
 //! But `ffai_sdpa_bidirectional` reads K/V **head-major**
 //! `[n_heads, n_tokens, head_dim]` — its `kv_slab = kvh * kv_stride *
