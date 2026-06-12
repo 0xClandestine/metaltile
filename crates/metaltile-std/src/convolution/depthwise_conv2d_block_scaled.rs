@@ -1180,501 +1180,163 @@ pub mod kernel_tests {
         s.expect(TestBuffer::from_vec("out", pack_f32(&expected, dt), dt)).grid_1d(n_out, 256)
     }
 
-    // ch=8, k=8 → C=64 (÷ 16/32/64); 16×16 input, stride 1, pad 0.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp4_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxfp4_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxfp4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
+    // One correctness test per QFormat via the shared `dw_setup` helper —
+    // mirrors the `*_bench_fmt!` benches instead of 30 hand-written fns.
+    // Shape: channels=8, 16×16 image, 8×8 patch? per-channel depthwise — see helper for arg order.
+    macro_rules! dw_test_fmt {
+        ($fn:ident, $kernel:path, $fmt:expr) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                dw_setup($kernel(dt), $fmt, 1, 8, 16, 16, 8, 1, 0, 1, dt)
+            }
+        };
     }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp4_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_nvfp4_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Nvfp4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp4_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_fp4_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp8_e4m3_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxfp8_e4m3_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxfp8E4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp8_e5m2_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxfp8_e5m2_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxfp8E5,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e5m2_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_fp8_e5m2_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp8E5m2,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp8_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_nvfp8_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Nvfp8,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    // fp8_e4m3 reuses the nvfp8 kernel (8-bit E4M3 + f32 scale).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e4m3_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_nvfp8_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp8E4m3,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int8_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int8_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int8,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-
-    // Symmetric sub-byte ints (int2-6, FP32 group scale 64) + MXINT (mxint2-6,
-    // E8M0 block scale 32) + MXINT8 (8-bit, E8M0). k=8 → C=64 is divisible by
-    // every group/block (64 and 32), so each channel's flat-bit-stream filter row
-    // lands on a u32 boundary and the per-block scale index is exact. The kernel
-    // and oracle share the codec, so the GPU output tracks the dequant-then-conv
-    // reference to float precision regardless of how coarse the quantization is.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int2_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int2_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int2,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int3_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int3_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int3,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int4_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int4_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int5_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int5_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int5,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int6_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int6_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int6,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint2_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint2_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint2,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint3_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint3_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint3,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint4_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint4_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint4,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint5_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint5_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint5,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint6_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint6_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint6,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint8_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_mxint8_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Mxint8,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-
-    // FP16-scale twins: same element packing + geometry as their FP32 twins, with
-    // an FP16 scale tensor. fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 +
-    // f16 scale). Tolerances match the other formats since the per-tap math is
-    // identical apart from the half-precision scale read.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp8_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Nvfp8F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e4m3_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp8E4m3F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp4_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_fp4_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp4F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e5m2_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_fp8_e5m2_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Fp8E5m2F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int2_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int2_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int2F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int3_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int3_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int3F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int4_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int4_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int4F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int5_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int5_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int5F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int6_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int6_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int6F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int8_f16_depthwise_conv2d(dt: DType) -> TestSetup {
-        dw_setup(
-            mt_int8_f16_depthwise_conv2d::kernel_ir_for(dt),
-            QFormat::Int8F16,
-            1,
-            8,
-            16,
-            16,
-            8,
-            1,
-            0,
-            1,
-            dt,
-        )
-    }
+    dw_test_fmt!(
+        test_mxfp4_depthwise_conv2d,
+        mt_mxfp4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxfp4
+    );
+    dw_test_fmt!(
+        test_nvfp4_depthwise_conv2d,
+        mt_nvfp4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Nvfp4
+    );
+    dw_test_fmt!(test_fp4_depthwise_conv2d, mt_fp4_depthwise_conv2d::kernel_ir_for, QFormat::Fp4);
+    dw_test_fmt!(
+        test_mxfp8_e4m3_depthwise_conv2d,
+        mt_mxfp8_e4m3_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxfp8E4
+    );
+    dw_test_fmt!(
+        test_mxfp8_e5m2_depthwise_conv2d,
+        mt_mxfp8_e5m2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxfp8E5
+    );
+    dw_test_fmt!(
+        test_fp8_e5m2_depthwise_conv2d,
+        mt_fp8_e5m2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Fp8E5m2
+    );
+    dw_test_fmt!(
+        test_nvfp8_depthwise_conv2d,
+        mt_nvfp8_depthwise_conv2d::kernel_ir_for,
+        QFormat::Nvfp8
+    );
+    dw_test_fmt!(
+        test_fp8_e4m3_depthwise_conv2d,
+        mt_nvfp8_depthwise_conv2d::kernel_ir_for,
+        QFormat::Fp8E4m3
+    );
+    dw_test_fmt!(
+        test_int8_depthwise_conv2d,
+        mt_int8_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int8
+    );
+    dw_test_fmt!(
+        test_int2_depthwise_conv2d,
+        mt_int2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int2
+    );
+    dw_test_fmt!(
+        test_int3_depthwise_conv2d,
+        mt_int3_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int3
+    );
+    dw_test_fmt!(
+        test_int4_depthwise_conv2d,
+        mt_int4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int4
+    );
+    dw_test_fmt!(
+        test_int5_depthwise_conv2d,
+        mt_int5_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int5
+    );
+    dw_test_fmt!(
+        test_int6_depthwise_conv2d,
+        mt_int6_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int6
+    );
+    dw_test_fmt!(
+        test_mxint2_depthwise_conv2d,
+        mt_mxint2_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint2
+    );
+    dw_test_fmt!(
+        test_mxint3_depthwise_conv2d,
+        mt_mxint3_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint3
+    );
+    dw_test_fmt!(
+        test_mxint4_depthwise_conv2d,
+        mt_mxint4_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint4
+    );
+    dw_test_fmt!(
+        test_mxint5_depthwise_conv2d,
+        mt_mxint5_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint5
+    );
+    dw_test_fmt!(
+        test_mxint6_depthwise_conv2d,
+        mt_mxint6_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint6
+    );
+    dw_test_fmt!(
+        test_mxint8_depthwise_conv2d,
+        mt_mxint8_depthwise_conv2d::kernel_ir_for,
+        QFormat::Mxint8
+    );
+    dw_test_fmt!(
+        test_nvfp8_f16_depthwise_conv2d,
+        mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Nvfp8F16
+    );
+    dw_test_fmt!(
+        test_fp8_e4m3_f16_depthwise_conv2d,
+        mt_nvfp8_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Fp8E4m3F16
+    );
+    dw_test_fmt!(
+        test_fp4_f16_depthwise_conv2d,
+        mt_fp4_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Fp4F16
+    );
+    dw_test_fmt!(
+        test_fp8_e5m2_f16_depthwise_conv2d,
+        mt_fp8_e5m2_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Fp8E5m2F16
+    );
+    dw_test_fmt!(
+        test_int2_f16_depthwise_conv2d,
+        mt_int2_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int2F16
+    );
+    dw_test_fmt!(
+        test_int3_f16_depthwise_conv2d,
+        mt_int3_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int3F16
+    );
+    dw_test_fmt!(
+        test_int4_f16_depthwise_conv2d,
+        mt_int4_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int4F16
+    );
+    dw_test_fmt!(
+        test_int5_f16_depthwise_conv2d,
+        mt_int5_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int5F16
+    );
+    dw_test_fmt!(
+        test_int6_f16_depthwise_conv2d,
+        mt_int6_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int6F16
+    );
+    dw_test_fmt!(
+        test_int8_f16_depthwise_conv2d,
+        mt_int8_f16_depthwise_conv2d::kernel_ir_for,
+        QFormat::Int8F16
+    );
 }
 
 /// Decode-shape benches: realistic depthwise stage (256 channels, 64×64 feature

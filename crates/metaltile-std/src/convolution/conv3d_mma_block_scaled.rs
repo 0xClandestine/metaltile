@@ -4076,526 +4076,127 @@ pub mod kernel_tests {
         )
     }
 
-    // in_ch=8, kd=kh=kw=2 → C = 64 (÷ 16/32/64 and a multiple of the 32-wide
-    // MMA K-tile); 5×5×5 volume → out 4×4×4, n_voxels=64 (2 tiles); out_ch=32.
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp4_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxfp4_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxfp4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
+    // One correctness test per QFormat via the shared `mma_setup` helper —
+    // mirrors the `*_bench_fmt!` benches instead of 30 hand-written fns.
+    // Shape: in_ch=8, 2×2×2 kernel; 5×5×5 volume, out_ch=32 — MMA tile shape.
+    macro_rules! conv3d_mma_test_fmt {
+        ($fn:ident, $kernel:path, $fmt:expr) => {
+            #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
+            fn $fn(dt: DType) -> TestSetup {
+                mma_setup($kernel(dt), $fmt, 1, 8, 5, 5, 5, 32, 2, 2, 2, dt)
+            }
+        };
     }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp4_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_nvfp4_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Nvfp4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp4_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_fp4_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp8_e4m3_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxfp8_e4m3_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxfp8E4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxfp8_e5m2_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxfp8_e5m2_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxfp8E5,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e5m2_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_fp8_e5m2_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp8E5m2,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp8_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_nvfp8_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Nvfp8,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    // fp8_e4m3 reuses the nvfp8 kernel (8-bit E4M3 + f32 scale).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e4m3_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_nvfp8_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp8E4m3,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int8_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int8_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int8,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    // ── Symmetric sub-byte int (FP32 scale, group 64) + MXINT (E8M0, block 32) ──
-    // Same conv shape as int8: in_ch=8, 2×2×2 kernel → C = 64 (a multiple of 32,
-    // so each filter row's bit-stream is word-aligned for every width).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int2_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int2_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int2,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int3_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int3_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int3,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int4_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int4_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int5_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int5_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int5,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int6_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int6_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int6,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint2_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint2_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint2,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint3_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint3_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint3,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint4_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint4_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint4,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint5_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint5_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint5,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint6_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint6_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint6,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_mxint8_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_mxint8_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Mxint8,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    // ── FP16-scale twins (Nvfp8F16 / Fp4F16 / Fp8E4m3F16 / Fp8E5m2F16 /
-    // Int2..6F16 / Int8F16). Same conv shape as the FP32 twins; only the scale
-    // tensor is f16. fp8_e4m3_f16 reuses the nvfp8_f16 kernel. ──
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_nvfp8_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_nvfp8_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Nvfp8F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    // fp8_e4m3_f16 reuses the nvfp8_f16 kernel (8-bit E4M3 + f16 scale).
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e4m3_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_nvfp8_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp8E4m3F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp4_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_fp4_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp4F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_fp8_e5m2_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_fp8_e5m2_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Fp8E5m2F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int2_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int2_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int2F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int3_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int3_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int3F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int4_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int4_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int4F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int5_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int5_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int5F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int6_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int6_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int6F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
-    #[test_kernel(dtypes = [f32, f16, bf16], tol = [5e-3, 5e-2, 2e-1])]
-    fn test_int8_f16_conv3d_mma(dt: DType) -> TestSetup {
-        mma_setup(
-            mt_int8_f16_conv3d_mma::kernel_ir_for(dt),
-            QFormat::Int8F16,
-            1,
-            8,
-            5,
-            5,
-            5,
-            32,
-            2,
-            2,
-            2,
-            dt,
-        )
-    }
+    conv3d_mma_test_fmt!(test_mxfp4_conv3d_mma, mt_mxfp4_conv3d_mma::kernel_ir_for, QFormat::Mxfp4);
+    conv3d_mma_test_fmt!(test_nvfp4_conv3d_mma, mt_nvfp4_conv3d_mma::kernel_ir_for, QFormat::Nvfp4);
+    conv3d_mma_test_fmt!(test_fp4_conv3d_mma, mt_fp4_conv3d_mma::kernel_ir_for, QFormat::Fp4);
+    conv3d_mma_test_fmt!(
+        test_mxfp8_e4m3_conv3d_mma,
+        mt_mxfp8_e4m3_conv3d_mma::kernel_ir_for,
+        QFormat::Mxfp8E4
+    );
+    conv3d_mma_test_fmt!(
+        test_mxfp8_e5m2_conv3d_mma,
+        mt_mxfp8_e5m2_conv3d_mma::kernel_ir_for,
+        QFormat::Mxfp8E5
+    );
+    conv3d_mma_test_fmt!(
+        test_fp8_e5m2_conv3d_mma,
+        mt_fp8_e5m2_conv3d_mma::kernel_ir_for,
+        QFormat::Fp8E5m2
+    );
+    conv3d_mma_test_fmt!(test_nvfp8_conv3d_mma, mt_nvfp8_conv3d_mma::kernel_ir_for, QFormat::Nvfp8);
+    conv3d_mma_test_fmt!(
+        test_fp8_e4m3_conv3d_mma,
+        mt_nvfp8_conv3d_mma::kernel_ir_for,
+        QFormat::Fp8E4m3
+    );
+    conv3d_mma_test_fmt!(test_int8_conv3d_mma, mt_int8_conv3d_mma::kernel_ir_for, QFormat::Int8);
+    conv3d_mma_test_fmt!(test_int2_conv3d_mma, mt_int2_conv3d_mma::kernel_ir_for, QFormat::Int2);
+    conv3d_mma_test_fmt!(test_int3_conv3d_mma, mt_int3_conv3d_mma::kernel_ir_for, QFormat::Int3);
+    conv3d_mma_test_fmt!(test_int4_conv3d_mma, mt_int4_conv3d_mma::kernel_ir_for, QFormat::Int4);
+    conv3d_mma_test_fmt!(test_int5_conv3d_mma, mt_int5_conv3d_mma::kernel_ir_for, QFormat::Int5);
+    conv3d_mma_test_fmt!(test_int6_conv3d_mma, mt_int6_conv3d_mma::kernel_ir_for, QFormat::Int6);
+    conv3d_mma_test_fmt!(
+        test_mxint2_conv3d_mma,
+        mt_mxint2_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint2
+    );
+    conv3d_mma_test_fmt!(
+        test_mxint3_conv3d_mma,
+        mt_mxint3_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint3
+    );
+    conv3d_mma_test_fmt!(
+        test_mxint4_conv3d_mma,
+        mt_mxint4_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint4
+    );
+    conv3d_mma_test_fmt!(
+        test_mxint5_conv3d_mma,
+        mt_mxint5_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint5
+    );
+    conv3d_mma_test_fmt!(
+        test_mxint6_conv3d_mma,
+        mt_mxint6_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint6
+    );
+    conv3d_mma_test_fmt!(
+        test_mxint8_conv3d_mma,
+        mt_mxint8_conv3d_mma::kernel_ir_for,
+        QFormat::Mxint8
+    );
+    conv3d_mma_test_fmt!(
+        test_nvfp8_f16_conv3d_mma,
+        mt_nvfp8_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Nvfp8F16
+    );
+    conv3d_mma_test_fmt!(
+        test_fp8_e4m3_f16_conv3d_mma,
+        mt_nvfp8_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Fp8E4m3F16
+    );
+    conv3d_mma_test_fmt!(
+        test_fp4_f16_conv3d_mma,
+        mt_fp4_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Fp4F16
+    );
+    conv3d_mma_test_fmt!(
+        test_fp8_e5m2_f16_conv3d_mma,
+        mt_fp8_e5m2_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Fp8E5m2F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int2_f16_conv3d_mma,
+        mt_int2_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int2F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int3_f16_conv3d_mma,
+        mt_int3_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int3F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int4_f16_conv3d_mma,
+        mt_int4_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int4F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int5_f16_conv3d_mma,
+        mt_int5_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int5F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int6_f16_conv3d_mma,
+        mt_int6_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int6F16
+    );
+    conv3d_mma_test_fmt!(
+        test_int8_f16_conv3d_mma,
+        mt_int8_f16_conv3d_mma::kernel_ir_for,
+        QFormat::Int8F16
+    );
 }
 
 /// Decode-shape benches: a realistic conv (in_ch=64, out_ch=256, 2×2×2 kernel →
