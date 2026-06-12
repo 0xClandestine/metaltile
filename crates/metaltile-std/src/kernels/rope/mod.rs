@@ -7,13 +7,13 @@
 //! an outer grid axis, so decode is just the single-row case (no separate
 //! decode kernel):
 //!   - `base`         — `mt_rope` (MLX `rope.metal` reference parity)
-//!   - `rope_llama`   — `mt_rope_llama` (per-row `positions`; decode = T=1)
-//!   - `partial_rope` — `mt_partial_rope` (DSv4 tail RoPE; decode = n_tokens=1)
-//!   - `rope_2d`      — `mt_rope_2d` (vision M-RoPE)
-//!   - `rope_yarn`    — `mt_rope_yarn`
+//!   - `rope_banded`  — `mt_rope_banded` (frequency-band scaling; decode = T=1)
+//!   - `partial_rope` — `mt_partial_rope` (rotates tail dims only; decode = n_tokens=1)
+//!   - `rope_2d`      — `mt_rope_2d` (2D positional / vision M-RoPE)
+//!   - `rope_yarn`    — `mt_rope_yarn` (YaRN context extension)
 
 pub mod base;
 pub mod partial_rope;
 pub mod rope_2d;
-pub mod rope_llama;
+pub mod rope_banded;
 pub mod rope_yarn;

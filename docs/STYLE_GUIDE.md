@@ -38,11 +38,13 @@ the kernel):
 ```
 crates/metaltile-std/src/kernels/
   ops/   core/gather/scatter/reduce/elementwise primitives
-  gemm/ sdpa/ moe/ norm/ rope/ conv/ ssm/ quant/ audio/ vision/ sampling/ kv_cache/
+  gemm/ sdpa/ moe/ norm/ rope/ convolution/ ssm/ quant/ audio/ vision/ sampling/ kv_cache/
   primitives.rs   cross-family decode/reduce ops inlined at codegen
 ```
 
-Put the kernel in the folder for its **operation** (`rope_yarn` → `kernels/rope/`,
+Folder names spell out abbreviated single words (`convolution`, not `conv`) and
+keep standard acronyms (`gemm`, `sdpa`, `moe`, `rope`, `ssm`). Put the kernel in
+the folder for its **operation** (`rope_yarn` → `kernels/rope/`,
 `gemv` → `kernels/gemm/`). The quantized form of an op is *not* a separate
 family — it folds into the op's file as a format axis (see §5). See
 [`KERNEL_CONSOLIDATION_PLAN.md`](specs/KERNEL_CONSOLIDATION_PLAN.md) for the full
@@ -121,7 +123,7 @@ The `//!` block at the top is the public documentation for the kernel. It must i
 
 | Pattern | Used for |
 |---|---|
-| `mt_<op>` | The operation (`mt_softmax`, `mt_copy`, `mt_rope_llama`) |
+| `mt_<op>` | The operation (`mt_softmax`, `mt_copy`, `mt_rope_banded`) |
 | `mt_<op>_<variant>` | A named variant (`mt_rms_norm_small`) |
 | `mt_<family>_<variant>` | Variant families from `variants(...)` (`mt_hadamard_n64`, `mt_int4_conv2d`) |
 

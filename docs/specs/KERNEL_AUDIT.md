@@ -79,7 +79,7 @@ Local verification of NAX kernels is the developer's responsibility on M4+ hardw
 | layer_norm | ✓ | ✓ | ✓ | `mlx/layer_norm.rs` → `mt_layer_norm<T>`. |
 | rms_norm | ✓ | ✓ | ✓ | `mlx/rms_norm.rs` → `mt_rms_norm<T>` + `mt_rms_norm_small<T>` (2-elem/thread, small-head_dim per-head q_norm/k_norm) + `mt_rms_norm_wide<T>` (strided wide-row variant for `head_dim > 4096`, e.g. Gemma 4 31B hidden=5376). |
 | rope (standard) | ✓ | ✓ | ✓ | `kernels/rope/base.rs` → `mt_rope`. |
-| rope (Llama-3 banded) | ✗ | ✗ | ✓ | `kernels/rope/rope_llama.rs` → `mt_rope_llama<T>`. Per-row `positions` tensor + row grid axis (decode = T=1, prefill = all tokens in one dispatch); generic dtype, optional Llama-3 frequency-band scaling. |
+| rope (frequency-band scaled) | ✗ | ✗ | ✓ | `kernels/rope/rope_banded.rs` → `mt_rope_banded<T>`. Per-row `positions` tensor + row grid axis (decode = T=1, prefill = all tokens in one dispatch); generic dtype, optional frequency-band scaling (Llama-3 / Qwen). |
 | sdpa_vector (prefill / generic) | ✓ | ✓ | ✓ | `mlx/scaled_dot_product_attention.rs` → `mt_sdpa<T>`. Scalar SDPA for short sequences. |
 | sdpa_vector (GQA decode, single pass) | ✓ | ✓ | ✓ | `mlx/sdpa_vector.rs` → `mt_sdpa_vector<T>` (d=128) + `mt_sdpa_vector_d{64,96,192,256}` (every production head_dim). Each scales the per-lane element count (2/3/6/8 elements). TPG=1024 throughout. |
 | sdpa_vector_2pass | ✓ | ✓ | ✓ | `ffai/sdpa_decode_2pass.rs` → pass1/pass2 pairs for d ∈ {64, 96, 128, 256}. d=256 uses 4-buffer TG reuse to stay within the 32 KB cap. |

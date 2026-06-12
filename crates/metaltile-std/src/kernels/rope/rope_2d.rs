@@ -12,7 +12,7 @@
 //!
 //! Within each half, the rotation pairs element `i` with element
 //! `i + quarter_dim` (rotate-half over that half), exactly as
-//! `rope_llama` pairs `i` with `i + half_dim` over the whole head:
+//! `rope_banded` pairs `i` with `i + half_dim` over the whole head:
 //!
 //!   half 0 (rows):   dims [0, half)            position = row
 //!   half 1 (cols):   dims [half, head_dim)     position = col
@@ -24,7 +24,7 @@
 //!     o1 = x1*cos - x2*sin
 //!     o2 = x1*sin + x2*cos
 //!
-//! This is distinct from `rope_llama` (1-D scalar position, optional
+//! This is distinct from `rope_banded` (1-D scalar position, optional
 //! Llama-3 banding) — `rope_2d` has no banding and consumes a per-token
 //! `(row, col)` pair instead of one global position.
 //!

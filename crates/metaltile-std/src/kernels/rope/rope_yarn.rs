@@ -22,7 +22,7 @@
 //! checkpoint's `mscale == mscale_all_dim` (the common case, including
 //! Nemotron-Labs-Diffusion).
 //!
-//! Same Grid3D dispatch shape as `mt_rope_llama`: one thread per
+//! Same Grid3D dispatch shape as `mt_rope_banded`: one thread per
 //! (head, i in 0..head_dim/2), each thread rotating the pair
 //! (i, i + half_dim). No reduction, no threadgroup memory.
 //!

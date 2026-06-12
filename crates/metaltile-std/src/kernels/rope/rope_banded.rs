@@ -1,16 +1,20 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Llama-style RoPE with optional Llama-3 frequency-band scaling, generic over
-//! T. One kernel serves both decode and prefill: position comes from a per-row
+//! Rotate-half RoPE with optional frequency-band scaling (low / high / smoothed
+//! wavelength bands), generic over T. Used by models that extend context via
+//! per-band frequency scaling — e.g. Llama-3 (scale_factor=8, low/high=1/4) and
+//! Qwen; with the bands disabled it is plain rotate-half RoPE.
+//!
+//! One kernel serves both decode and prefill: position comes from a per-row
 //! `positions: Tensor<u32>` and an outer grid axis selects the row, so decode
 //! is just the `T = 1` case (a 1-element `positions` buffer, `z = 1` grid) and
-//! prefill ropes all T tokens in ONE dispatch. (The old single-token
-//! `mt_rope_llama` kernel was redundant — `#[constexpr]` is already a runtime
-//! buffer read, so the scalar-position variant bought nothing over `T = 1`.)
+//! prefill ropes all T tokens in ONE dispatch. (The old single-token kernel was
+//! redundant — `#[constexpr]` is already a runtime buffer read, so the
+//! scalar-position variant bought nothing over `T = 1`.)
 //!
 //! Different from `mt_rope` (in `kernels/rope/base.rs`):
 //!   - generic dtype (mt_rope is f16-only)
-//!   - supports Llama-3 wavelength banding (low / high / smoothed)
+//!   - supports wavelength banding (low / high / smoothed)
 //!
 //! For each (head, i in 0..head_dim/2):
 //!
@@ -37,7 +41,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn mt_rope_llama<T>(
+pub fn mt_rope_banded<T>(
     qk: Tensor<T>,
     positions: Tensor<u32>,
     out: Tensor<T>,
@@ -89,7 +93,7 @@ pub fn mt_rope_llama<T>(
     store(out[i2], o2.cast::<T>());
 }
 
-/// New-syntax correctness for `mt_rope_llama`. Grid3D `[T, n_heads, half_dim]`,
+/// New-syntax correctness for `mt_rope_banded`. Grid3D `[T, n_heads, half_dim]`,
 /// tpg `[1,1,1]` (one thread per (row, head, i); each writes the rotation pair
 /// i / i+half_dim). Oracle replays the exact banded-inv_freq + rotation math in
 /// f32, per row at that row's position. Covers decode (T=1) and prefill (T>1),
@@ -97,7 +101,7 @@ pub fn mt_rope_llama<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::mt_rope_llama;
+    use super::mt_rope_banded;
     use crate::utils::{pack_f32, unpack_f32};
 
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
@@ -135,7 +139,14 @@ pub mod kernel_tests {
     /// frequency index, not the position, so the small positions keep the
     /// cos/sin precision tight while still hitting all three bands.
     #[allow(clippy::too_many_arguments)]
-    fn rope_llama_setup(dt: DType, t_len: usize, sf: f32, lf: f32, hf: f32, omp: f32) -> TestSetup {
+    fn rope_banded_setup(
+        dt: DType,
+        t_len: usize,
+        sf: f32,
+        lf: f32,
+        hf: f32,
+        omp: f32,
+    ) -> TestSetup {
         let (n_heads, head_dim) = (4usize, 64usize);
         let half = head_dim / 2;
         let row_stride = n_heads * head_dim; // contiguous (no fused-QKV slack)
@@ -159,7 +170,7 @@ pub mod kernel_tests {
                 }
             }
         }
-        TestSetup::new(mt_rope_llama::kernel_ir_for(dt))
+        TestSetup::new(mt_rope_banded::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("qk", pack_f32(&qk_f, dt), dt))
             .input(TestBuffer::from_vec("positions", u32_bytes(&positions), DType::U32))
@@ -178,34 +189,34 @@ pub mod kernel_tests {
 
     // Decode (T=1): single-token degenerate case, banding OFF.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
-    fn test_rope_llama_decode(dt: DType) -> TestSetup {
-        rope_llama_setup(dt, 1, 1.0, 1.0, 1.0, 1.0e9)
+    fn test_rope_banded_decode(dt: DType) -> TestSetup {
+        rope_banded_setup(dt, 1, 1.0, 1.0, 1.0, 1.0e9)
     }
 
     // Prefill (T=4): banding OFF → high-freq branch for every pair.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
-    fn test_rope_llama(dt: DType) -> TestSetup { rope_llama_setup(dt, 4, 1.0, 1.0, 1.0, 1.0e9) }
+    fn test_rope_banded(dt: DType) -> TestSetup { rope_banded_setup(dt, 4, 1.0, 1.0, 1.0, 1.0e9) }
 
     // Prefill (T=4) with Llama-3 frequency-band scaling ON (scale 8, low/high
     // factors 1/4, original_max 8192) — exercises all three bands (low-freq
     // scaled, high-freq unscaled, smoothed-medium), selected by frequency index.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-4, 1e-2, 5e-2])]
-    fn test_rope_llama_banding(dt: DType) -> TestSetup {
-        rope_llama_setup(dt, 4, 8.0, 1.0, 4.0, 8192.0)
+    fn test_rope_banded_scaled(dt: DType) -> TestSetup {
+        rope_banded_setup(dt, 4, 8.0, 1.0, 4.0, 8192.0)
     }
 }
 
-/// New-syntax benchmarks for `mt_rope_llama`: decode (T=1) and prefill (T=512).
+/// New-syntax benchmarks for `mt_rope_banded`: decode (T=1) and prefill (T=512).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::mt_rope_llama;
+    use super::mt_rope_banded;
 
     /// Builds a `T`-row bench at the given head geometry (Llama-3 banding on).
-    fn rope_llama_bench(dt: DType, t_len: usize, n_heads: usize, head_dim: usize) -> BenchSetup {
+    fn rope_banded_bench(dt: DType, t_len: usize, n_heads: usize, head_dim: usize) -> BenchSetup {
         let half = head_dim / 2;
         let row_stride = n_heads * head_dim;
-        BenchSetup::new(mt_rope_llama::kernel_ir_for(dt))
+        BenchSetup::new(mt_rope_banded::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("qk", t_len * row_stride, dt))
             .buffer(BenchBuffer::random("positions", t_len, DType::U32))
@@ -228,9 +239,9 @@ pub mod kernel_benches {
 
     /// Decode shape — one token, head_dim 128.
     #[bench(dtypes = [f32, f16, bf16])]
-    fn bench_rope_llama_decode(dt: DType) -> BenchSetup { rope_llama_bench(dt, 1, 32, 128) }
+    fn bench_rope_banded_decode(dt: DType) -> BenchSetup { rope_banded_bench(dt, 1, 32, 128) }
 
     /// Prefill shape — 512 tokens in one dispatch.
     #[bench(dtypes = [f32, f16, bf16])]
-    fn bench_rope_llama(dt: DType) -> BenchSetup { rope_llama_bench(dt, 512, 32, 128) }
+    fn bench_rope_banded(dt: DType) -> BenchSetup { rope_banded_bench(dt, 512, 32, 128) }
 }
