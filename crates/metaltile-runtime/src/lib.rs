@@ -17,7 +17,10 @@ pub mod error;
 
 pub use context::{Context, DispatchResult, DispatchSpec, ResidentBuffer};
 #[cfg(feature = "cuda")]
-pub use device::cuda::{CudaDevice, CudaFunction, CudaModule, DeviceBuffer};
+pub use device::cuda::{
+    CudaDevice, CudaFunction, CudaModule, DeviceBuffer, MoeGroupedFp4Desc, MoeGroupedGemmDesc,
+    MoeGroupedKernel, MoePreparedHandle, MOE_GROUPED_CUTLASS, MOE_GROUPED_CUTLASS_FP4,
+};
 pub use device::gpu_family::GpuFamily;
 #[cfg(feature = "hip")]
 pub use device::hip::{HipBuffer, HipDevice, HipKernel, HipModuleHandle};

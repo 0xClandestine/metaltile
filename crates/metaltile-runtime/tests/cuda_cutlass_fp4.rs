@@ -12,7 +12,7 @@
 //! CUTLASS" error), so CI shards without the toolkit stay green.
 #![cfg(feature = "cuda")]
 
-use metaltile_runtime::CudaDevice;
+use metaltile_runtime::{CudaDevice, MoeGroupedFp4Desc, MoeGroupedKernel};
 
 // ── fp4 element decode. e2m1: sign | exp(2) | mant(1). 0,.5,1,1.5,2,3,4,6 (±). ──
 const FP4_LUT: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
@@ -173,19 +173,25 @@ fn grouped_nvfp4_moe_gemm_matches_f32_oracle() {
     let dd = dev.alloc(mt * N * 2).expect("alloc D (f16)");
 
     let group_rows: Vec<i32> = rows.iter().map(|&m| m as i32).collect();
-    let res = dev.moe_grouped_cutlass_fp4(
-        da.device_ptr(),
-        dsfa.device_ptr(),
-        db.device_ptr(),
-        dsfb.device_ptr(),
-        dd.device_ptr(),
-        &group_rows,
-        &expert_ids,
-        &sfa_off,
-        0, // alpha_vec = none → alpha 1
-        N,
-        K,
-    );
+
+    // Dispatch THROUGH the by-name seam (issue #285): resolve the registered
+    // kernel name → variant, build the repr(C) descriptor, and hand both to
+    // `dispatch_grouped_moe`. This proves the kernel is reachable by name from
+    // the planner/executor path, not only via the raw `CudaDevice` method.
+    let kernel = MoeGroupedKernel::from_name("moe_grouped_cutlass_fp4")
+        .expect("moe_grouped_cutlass_fp4 must resolve by name");
+    let desc = MoeGroupedFp4Desc {
+        a: da.device_ptr(),
+        sfa: dsfa.device_ptr(),
+        w: db.device_ptr(),
+        sfw: dsfb.device_ptr(),
+        c: dd.device_ptr(),
+        alpha_vec: 0, // none → alpha 1
+        n: N,
+        k: K,
+    };
+    let res =
+        dev.dispatch_grouped_moe(kernel, None, Some(&desc), &group_rows, &expert_ids, &sfa_off);
     if let Err(e) = &res
         && e.to_string().contains("without CUTLASS")
     {
@@ -219,4 +225,55 @@ fn grouped_nvfp4_moe_gemm_matches_f32_oracle() {
     // abs bound plus a near-1 cosine pins true correctness.
     assert!(cos > 0.9999, "NVFP4 grouped GEMM cosine too low: {cos:.6}");
     assert!(max_abs < 1.0, "NVFP4 grouped GEMM max|Δ| too high: {max_abs:.4}");
+}
+
+// Name-resolution + dispatch-seam wiring for BOTH grouped CUTLASS GEMMs
+// (issue #285). Needs no GPU and no CUTLASS: it only checks that each kernel
+// resolves by its registered name and that `dispatch_grouped_moe` validates
+// the descriptor it was handed (missing descriptor → a clear error, never a
+// silent wrong-buffer dispatch). The GPU correctness path is covered by
+// `grouped_nvfp4_moe_gemm_matches_f32_oracle` above (fp4) which now drives the
+// same `dispatch_grouped_moe` seam.
+#[test]
+fn grouped_moe_kernels_resolve_by_name_and_validate_descriptors() {
+    use metaltile_runtime::{MoeGroupedGemmDesc, MOE_GROUPED_CUTLASS, MOE_GROUPED_CUTLASS_FP4};
+
+    // both family members resolve by their registered name; unknown names don't.
+    assert_eq!(MoeGroupedKernel::from_name(MOE_GROUPED_CUTLASS), Some(MoeGroupedKernel::F16));
+    assert_eq!(MoeGroupedKernel::from_name(MOE_GROUPED_CUTLASS_FP4), Some(MoeGroupedKernel::Fp4));
+    assert_eq!(MoeGroupedKernel::from_name("nope"), None);
+    assert_eq!(MoeGroupedKernel::F16.name(), MOE_GROUPED_CUTLASS);
+    assert_eq!(MoeGroupedKernel::Fp4.name(), MOE_GROUPED_CUTLASS_FP4);
+
+    let Some(dev) = CudaDevice::create().expect("CUDA init") else {
+        eprintln!("no CUDA device — skipping dispatch-seam descriptor checks");
+        return;
+    };
+
+    // Wrong/missing descriptor for the selected kernel is a clear dispatch
+    // error, proving the seam routes by name and guards its args. (No GPU work
+    // happens — validation fails before any FFI call.)
+    let group_rows = [1i32];
+    let expert_ids = [0i32];
+    let sfa_off = [0i64];
+    let f16_desc = MoeGroupedGemmDesc { a: 0, w: 0, c: 0, n: 8, k: 8 };
+
+    // F16 selected but no F16 descriptor → error.
+    let err = dev
+        .dispatch_grouped_moe(MoeGroupedKernel::F16, None, None, &group_rows, &expert_ids, &sfa_off)
+        .expect_err("F16 dispatch with no descriptor must error");
+    assert!(err.to_string().contains("MoeGroupedGemmDesc"), "unexpected error: {err}");
+
+    // Fp4 selected but only an F16 descriptor present → error.
+    let err = dev
+        .dispatch_grouped_moe(
+            MoeGroupedKernel::Fp4,
+            Some(&f16_desc),
+            None,
+            &group_rows,
+            &expert_ids,
+            &sfa_off,
+        )
+        .expect_err("Fp4 dispatch with no Fp4 descriptor must error");
+    assert!(err.to_string().contains("MoeGroupedFp4Desc"), "unexpected error: {err}");
 }

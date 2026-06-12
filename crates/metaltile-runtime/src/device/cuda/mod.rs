@@ -15,6 +15,12 @@
 //! untouched and stays the zero-config default.
 
 mod ffi;
+mod moe_grouped;
+
+pub use moe_grouped::{
+    MoeGroupedFp4Desc, MoeGroupedGemmDesc, MoeGroupedKernel, MoePreparedHandle,
+    MOE_GROUPED_CUTLASS, MOE_GROUPED_CUTLASS_FP4,
+};
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -725,7 +731,7 @@ impl CudaDevice {
         n: usize,
         k: usize,
         max_m_total: usize,
-    ) -> Result<u64, MetalTileError> {
+    ) -> Result<MoePreparedHandle, MetalTileError> {
         self.ensure_current();
         #[cfg(have_cutlass)]
         {
@@ -754,7 +760,9 @@ impl CudaDevice {
             if h.is_null() {
                 return Err(MetalTileError::Dispatch("cutlass_fp4_prepare failed".into()));
             }
-            Ok(h as u64)
+            // SAFETY: `h` is non-null and freshly returned by the `_prepare`
+            // FFI; the newtype's Drop releases it via the `_release` entry.
+            Ok(unsafe { MoePreparedHandle::from_raw(h as u64) })
         }
         #[cfg(not(have_cutlass))]
         {
@@ -767,7 +775,7 @@ impl CudaDevice {
     /// `[n_groups+1]` row offsets (the router's expert offsets).
     pub fn moe_grouped_cutlass_fp4_run(
         &self,
-        handle: u64,
+        handle: &MoePreparedHandle,
         a: CUdeviceptr,
         sfa: CUdeviceptr,
         d_out: CUdeviceptr,
@@ -788,7 +796,7 @@ impl CudaDevice {
             }
             let r = unsafe {
                 moe_grouped_gemm_cutlass_fp4_run(
-                    handle as *mut c_void,
+                    handle.as_raw() as *mut c_void,
                     a as *const c_void,
                     sfa as *const c_void,
                     d_out as *mut c_void,
@@ -803,7 +811,7 @@ impl CudaDevice {
         }
         #[cfg(not(have_cutlass))]
         {
-            let _ = (handle, a, sfa, d_out, off_dev);
+            let _ = (handle.as_raw(), a, sfa, d_out, off_dev);
             Err(MetalTileError::Dispatch("built without CUTLASS (set CUTLASS_DIR)".into()))
         }
     }
