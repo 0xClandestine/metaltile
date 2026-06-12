@@ -8,8 +8,10 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
-use metaltile::core::{dtype::DType, ir::KernelMode};
-use metaltile_runtime::Context;
+use metaltile::{
+    Context,
+    core::{dtype::DType, ir::KernelMode},
+};
 use metaltile_std::ffai::{
     moe_bgemm_q2k_bm64::ffai_moe_bgemm_q2k_bm64,
     moe_bgemm_q2k_view_u16_bm64::ffai_moe_bgemm_q2k_view_u16_bm64,

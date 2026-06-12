@@ -969,6 +969,18 @@ pub mod kernel_tests {
         setup_d128(dt, 64, 64, 0, 0, true, 2.5)
     }
 
+    // Strided / partially-filled KV cache: n_kv < kv_stride (the real
+    // decode shape — cache allocated for `kv_stride` positions, only
+    // `n_kv` filled). The per-head slab base is `kv_head * kv_stride *
+    // head_dim`, so kv-heads ≥ 1 read from a different offset than the
+    // contiguous (n_kv == kv_stride) case the rest of the corpus covers.
+    // Guards against a backend that conflates n_kv with kv_stride in the
+    // per-head index math. Dense mask.
+    #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-3, 2e-3, 1e-2])]
+    fn test_ffai_sdpa_decode_strided(dt: DType) -> TestSetup {
+        setup_d128(dt, 48, 256, 0, 0, false, 0.0)
+    }
+
     // ── d256 ─────────────────────────────────────────────────────────
 
     fn setup_d256(dt: DType, has_sink: bool) -> TestSetup {

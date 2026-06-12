@@ -21,8 +21,7 @@ mod common;
 use std::{collections::BTreeMap, time::Instant};
 
 use common::{Dt, gpu_lock, pack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::{
     gated_delta::{mt_gated_delta_chunk, mt_gated_delta_step},
     gated_delta_wy::mt_gated_delta_wy_chunk,

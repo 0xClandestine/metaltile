@@ -83,12 +83,21 @@ impl SuitePrinter {
 
     /// Print one `ProtocolMessage::BenchResult` line (Phase 2 subprocess path).
     ///
-    /// Emits a single compact row: `  ✓/✗  <name> [<dtype>]  <mt> GB/s  (ref: <ref>)  <pct>%`.
-    /// This intentionally does not try to match the full `print_batch` table
-    /// layout — that refactor (grouping by kernel name, shared column widths)
-    /// is a follow-up once all commands are subprocess-based.
+    /// Rows are grouped under an op header (the kernel name stripped of its
+    /// `mt_` prefix / dtype suffix), with one compact row per (dtype × shape):
+    /// `  ✓/✗  <name> [<dtype>]  <shape>  <mt> GB/s  (ref: <ref>)  <pct>%`.
+    /// Full shared-column-width alignment with `print_batch` is still a
+    /// follow-up once all commands are subprocess-based.
     pub fn print_bench_result(&mut self, r: &ProtoBenchResult) {
         self.started = true;
+        let group = metaltile_core::protocol::op_group(&r.name).to_string();
+        if self.last_op_display.as_deref() != Some(&group) {
+            if self.last_op_display.is_some() {
+                println!();
+            }
+            println!("  {}", paint_stdout(&group, Style::new().fg(Color::Cyan).bold()));
+            self.last_op_display = Some(group);
+        }
         let ok_sym = if r.correct {
             paint_stdout("✓", Style::new().fg(Color::Green).bold())
         } else {
@@ -96,6 +105,11 @@ impl SuitePrinter {
         };
         let label =
             paint_stdout(format!("{} [{}]", r.name, r.dtype), Style::new().fg(Color::BrightWhite));
+        let shape_part = if r.shape.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", paint_stdout(&r.shape, Style::new().fg(Color::BrightBlack)))
+        };
         let mt = paint_stdout(
             format!("{:.1} GB/s", r.mt_gbps),
             Style::new().fg(Color::BrightWhite).bold(),
@@ -141,7 +155,7 @@ impl SuitePrinter {
             },
             None => String::new(),
         };
-        println!("  {ok_sym}  {label}  {mt}  {ref_part}  {pct_part}{profile_part}");
+        println!("  {ok_sym}  {label}{shape_part}  {mt}  {ref_part}  {pct_part}{profile_part}");
         self.flush();
     }
 

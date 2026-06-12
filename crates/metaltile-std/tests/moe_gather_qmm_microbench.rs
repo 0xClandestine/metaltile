@@ -12,8 +12,7 @@ mod common;
 use std::{collections::BTreeMap, time::Instant};
 
 use common::{Dt, gpu_lock, pack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::moe::{
     mt_moe_gather_qmm_int4,
     mt_moe_gather_qmm_int4_m8,

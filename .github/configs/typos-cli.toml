@@ -1,5 +1,7 @@
 [files]
-extend-exclude = []
+# Binary image assets — typos' binary detection misses PNGs with long
+# printable runs and flags compressed bytes as words.
+extend-exclude = ["*.png"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -33,6 +35,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-identifiers]
+# Vulkan spec field name (VkPhysicalDeviceLimits.maxSamplerLodBias)
+maxSamplerLodBias = "maxSamplerLodBias"
 
 # Weird syntax, but this how you ignore corrections for certain words.
 [default.extend-words]
@@ -54,6 +58,10 @@ Nd = "Nd"
 # froms = "froms"
 thr = "thr"
 THR = "THR"
+# HIP shared-memory opt-in attribute (hipDeviceAttributeSharedMemPerBlockOptin)
+optin = "optin"
+Optin = "Optin"
+OPTIN = "OPTIN"
 
 [type.go]
 extend-glob = []

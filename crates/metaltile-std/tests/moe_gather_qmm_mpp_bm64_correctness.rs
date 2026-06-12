@@ -21,8 +21,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::{moe::mt_moe_gather_qmm_int4, moe_mpp_bm64};
 
 /// Pack a row of int4 weights into uint32s (8 per uint, LSB-first per

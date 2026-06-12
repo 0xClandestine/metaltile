@@ -15,8 +15,7 @@ use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, pack_u32_bytes, unpack_bytes};
 use half::f16;
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::moe_gemv_rows_view_iq2xxs::{
     ffai_moe_gemv_rows_view_iq2xxs,
     ffai_moe_gemv_rows_view_u16_iq2xxs,

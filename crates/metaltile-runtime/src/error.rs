@@ -27,6 +27,14 @@ pub enum MetalTileError {
     #[error("codegen error: {0}")]
     Codegen(#[from] metaltile_codegen::error::Error),
 
+    /// The device cannot satisfy a kernel-launch requirement its
+    /// architecture caps below (e.g. requesting >48KB dynamic shared
+    /// memory on a pre-Volta GPU where `cuFuncSetAttribute` rejects the
+    /// opt-in). Surfaced *before* launch with a clear reason rather than
+    /// letting a cryptic `cuLaunchKernel: invalid argument` escape.
+    #[error("device capability: {0}")]
+    DeviceCapability(String),
+
     #[error("not implemented on this platform")]
     UnsupportedPlatform,
 

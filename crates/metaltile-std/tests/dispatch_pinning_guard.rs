@@ -20,8 +20,10 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::gpu_lock;
-use metaltile::core::{dtype::DType, ir::KernelMode};
-use metaltile_runtime::Context;
+use metaltile::{
+    Context,
+    core::{dtype::DType, ir::KernelMode},
+};
 use metaltile_std::mlx::rms_norm::mt_rms_norm;
 
 /// Buffers for an `n`-wide single-row `mt_rms_norm` dispatch (constexpr `n`

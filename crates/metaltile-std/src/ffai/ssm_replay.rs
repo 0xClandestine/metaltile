@@ -36,11 +36,11 @@ use metaltile::kernel;
 //   d128_128_32_2 — Production cell (Jamba / Nemotron): Dh=128, Ds=128, H=32, G=2
 
 #[kernel(variants(
-    DH = [16u32, 128u32],
-    DS = [64u32, 128u32],
-    H = [4u32, 32u32],
-    G = [2u32, 2u32],
-    NPT = [2, 4],
+    DH = [16u32, 128u32, 64u32],
+    DS = [64u32, 128u32, 128u32],
+    H = [4u32, 32u32, 64u32],
+    G = [2u32, 2u32, 8u32],
+    NPT = [2, 4, 4],
     suffix = "d{DH}_{DS}_{H}_{G}"
 ))]
 pub fn ssm_step_record<T>(
@@ -122,10 +122,10 @@ pub fn ssm_step_record<T>(
 // Variants mirror the record kernel above (G not needed here).
 
 #[kernel(variants(
-    DH = [16u32, 128u32],
-    DS = [64u32, 128u32],
-    H = [4u32, 32u32],
-    NPT = [2, 4],
+    DH = [16u32, 128u32, 64u32],
+    DS = [64u32, 128u32, 128u32],
+    H = [4u32, 32u32, 64u32],
+    NPT = [2, 4, 4],
     suffix = "d{DH}_{DS}_{H}"
 ))]
 pub fn ssm_replay<T>(

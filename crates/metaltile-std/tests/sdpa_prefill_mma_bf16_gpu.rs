@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes};
-use metaltile_runtime::Context;
+use metaltile::Context;
 use metaltile_std::mlx::steel::attn::steel_attention_mma_bf16::mt_sdpa_prefill_mma_bf16;
 
 /// Causal-prefill SDPA reference for the (B, n_q_heads, q_len, head_dim)

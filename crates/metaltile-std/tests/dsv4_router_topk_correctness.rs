@@ -9,8 +9,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::{Dt, gpu_lock, pack_bytes, unpack_bytes, unpack_u32_bytes};
-use metaltile::core::ir::KernelMode;
-use metaltile_runtime::Context;
+use metaltile::{Context, core::ir::KernelMode};
 use metaltile_std::ffai::dsv4_router_topk::{mt_dsv4_router_topk, mt_remap_u32};
 
 #[test]

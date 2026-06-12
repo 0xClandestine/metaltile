@@ -402,8 +402,16 @@ pub mod kernel_tests {
     }
 
     // Hv == Hk (no key-sharing) at minimum dk=32, T=3 tokens.
-    // a_log0=-1.5 / conv_scale=0.4 produce higher gain than the GQA fixture,
-    // accumulating ~8e-3 absolute error across the 3-step recurrence in f32.
+    //
+    // The f32 tol is 1e-2 (vs 5e-3 on the GQA sibling) because this
+    // variant uses `a_log=-1.5` (a 4× weaker decay than the GQA setup's
+    // -3.0), which amplifies y to magnitude ~24K. At that magnitude the
+    // GQA tol of 5e-3 corresponds to <1 ULP, leaving no headroom for the
+    // ~2-ULP rounding difference between HIP's OCML `expf`/`logf` and the
+    // Rust f32 oracle's libm. Vulkan's GLSL exp/log happens to round
+    // close enough to libm to clear 5e-3 — HIP doesn't. 1e-2 = ~3 ULPs at
+    // peak magnitude, which both backends clear and which is still tight
+    // for a 3-token gain-sensitive recurrence.
     #[test_kernel(dtypes = [f32, f16, bf16], tol = [1e-2, 5e-2, 2e-1])]
     fn test_mt_gated_delta_prep_chunk_no_gqa(dt: DType) -> TestSetup {
         setup(1, 3, 4, 4, 4, 32, 1.0, 0.4, 0.1, -1.5, dt)

@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 mod common;
 
 use common::gpu_lock;
-use metaltile_runtime::Context;
+use metaltile::Context;
 use metaltile_std::probe::mpp_matmul_smoke;
 
 const M: usize = 16;
