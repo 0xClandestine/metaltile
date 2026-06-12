@@ -17,7 +17,12 @@ unicode = true
 ignore-hex = true
 identifier-leading-digits = false
 locale = "en"
-extend-ignore-identifiers-re = []
+extend-ignore-identifiers-re = [
+    # Block-scaled low-precision number-format names: data type `eXmY`
+    # (e.g. e2m1) and `ueXmY` scale-factor types (e.g. ue4m3, ue8m0).
+    # The leading `ue` otherwise tokenizes as a typo for `use`.
+    '\bu?e[0-9]+m[0-9]+\b',
+]
 extend-ignore-words-re = []
 # Structural ignores — these generalise instead of enumerating every
 # domain word, so the `extend-words` list below stops growing:
