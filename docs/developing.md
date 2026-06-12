@@ -231,6 +231,12 @@ A "flat ~215 µs regardless of context length" sliding-window-attention claim tu
 
 ## Kernel-writing philosophy
 
+> **The full how-to lives in the [Kernel Style Guide](STYLE_GUIDE.md)** — file
+> shape, naming, the `#[kernel(variants(...))]` axis, shared primitives, the CPU
+> oracle, and the bench. Read it before adding a kernel; the principles below are
+> the short version. (Where a kernel *file* belongs is the
+> [consolidation plan](specs/KERNEL_CONSOLIDATION_PLAN.md).)
+
 - **Improve the compiler, don't hand-write MSL.** If the DSL can't express a pattern, extend the codegen (body parser → IR → MSL emit). Don't bypass it.
 - **One generic `<T>` kernel** beats five precision-specific copies — `f32` / `f16` / `bf16` all flow through the same `#[kernel] fn`.
 - **Every non-trivial kernel ships a GPU correctness test in the same commit.** See [Testing](testing.md) — it is the only layer that catches the empty-body and numeric-correctness bugs above.

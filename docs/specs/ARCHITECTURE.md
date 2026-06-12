@@ -9,8 +9,8 @@ test` / `tile build` run and measure it today. Companion docs:
 [`TOOLCHAIN_DESIGN.md`](TOOLCHAIN_DESIGN.md) (the `#[kernel]` /
 `#[kernel(variants(...))]` / `#[bench]` / `#[test_kernel]` macro surface),
 [`BENCH_METRICS_SPEC.md`](BENCH_METRICS_SPEC.md) (metric definitions),
-[`CONV_CONSOLIDATION_PLAN.md`](CONV_CONSOLIDATION_PLAN.md) (the `convolution/`
-reorg), the backend specs ([`CUDA`](CUDA_BACKEND_SPEC.md) /
+[`KERNEL_CONSOLIDATION_PLAN.md`](KERNEL_CONSOLIDATION_PLAN.md) (the kernel
+restructure roadmap), the backend specs ([`CUDA`](CUDA_BACKEND_SPEC.md) /
 [`AMD`](AMD_BACKEND_SPEC.md) / [`VULKAN`](VULKAN_BACKEND_SPEC.md) /
 [`ANE`](ANE_BACKEND_SPEC.md)), [`cli.md`](../cli.md) (command flags),
 [`developing.md`](../developing.md) (kernel-authoring hazards).
