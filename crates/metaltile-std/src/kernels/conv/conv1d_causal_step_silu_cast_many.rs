@@ -21,7 +21,7 @@
 //!
 //! On top of the bandwidth save the per-channel kernel collapses
 //! `T * (conv_step + silu_cast) = 2T` dispatches per layer into one —
-//! same dispatch-saving pattern as `mt_rope_llama_many` and
+//! same dispatch-saving pattern as `mt_rope_llama` and
 //! `kv_cache_update_many`.
 //!
 //! Layout:
