@@ -5,4 +5,5 @@
 //! one PR at a time from the legacy `mlx/` + `ffai/` folders; `pub fn` names are
 //! preserved across the move so the kernel inventory / FFAI emit are unaffected.
 
+pub mod conv;
 pub mod rope;
