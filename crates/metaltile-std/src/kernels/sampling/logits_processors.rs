@@ -52,7 +52,7 @@ use metaltile::kernel;
 //   read/write out of bounds; the runtime should size the dispatch so the
 //   total thread count exactly matches the logits length.
 #[kernel]
-pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temperature: f32) {
+pub fn mt_logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temperature: f32) {
     let i = program_id::<0>();
     let inv_t = 1.0f32 / temperature;
     let v = load(inp[i]).cast::<f32>();
@@ -89,7 +89,7 @@ pub fn logits_temperature<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] temper
 // - **No `threadgroup_*` / `simd_*` cooperation** — every thread is
 //   independent. The only invariant is the dedupe contract above.
 #[kernel]
-pub fn logits_repetition_penalty<T>(
+pub fn mt_logits_repetition_penalty<T>(
     mut logits: Tensor<T>,
     token_ids: Tensor<u32>,
     #[constexpr] penalty: f32,
@@ -104,7 +104,7 @@ pub fn logits_repetition_penalty<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::{logits_repetition_penalty, logits_temperature};
+    use super::{mt_logits_repetition_penalty, mt_logits_temperature};
     use crate::utils::{pack_f32, unpack_f32};
 
     fn u32_bytes(v: &[u32]) -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() }
@@ -118,7 +118,7 @@ pub mod kernel_tests {
         // Kernel computes `v * (1/T)` in f32 then casts back; oracle mirrors.
         let inv_t = 1.0f32 / temperature;
         let expected: Vec<f32> = rounded.iter().map(|&v| v * inv_t).collect();
-        TestSetup::new(logits_temperature::kernel_ir_for(dt))
+        TestSetup::new(mt_logits_temperature::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("inp", pack_f32(&logits, dt), dt))
             .input(TestBuffer::zeros("out", n, dt))
@@ -145,7 +145,7 @@ pub mod kernel_tests {
             let v = expected[tok as usize];
             expected[tok as usize] = if v > 0.0 { v / penalty } else { v * penalty };
         }
-        TestSetup::new(logits_repetition_penalty::kernel_ir_for(dt))
+        TestSetup::new(mt_logits_repetition_penalty::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("logits", pack_f32(&logits, dt), dt))
             .input(TestBuffer::from_vec("token_ids", u32_bytes(&token_ids), DType::U32))
@@ -159,7 +159,7 @@ pub mod kernel_tests {
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::{logits_repetition_penalty, logits_temperature};
+    use super::{mt_logits_repetition_penalty, mt_logits_temperature};
 
     fn u32_bytes(v: impl Iterator<Item = u32>) -> Vec<u8> {
         v.flat_map(|x| x.to_le_bytes()).collect()
@@ -168,7 +168,7 @@ pub mod kernel_benches {
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_temperature(dt: DType) -> BenchSetup {
         let n = 152_064usize;
-        BenchSetup::new(logits_temperature::kernel_ir_for(dt))
+        BenchSetup::new(mt_logits_temperature::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("inp", n, dt))
             .buffer(BenchBuffer::zeros("out", n, dt).output())
@@ -182,7 +182,7 @@ pub mod kernel_benches {
         // A modest context window of distinct token ids over a Qwen-scale
         // vocab — one thread per token id.
         let (vocab, n_tokens) = (152_064usize, 2048usize);
-        BenchSetup::new(logits_repetition_penalty::kernel_ir_for(dt))
+        BenchSetup::new(mt_logits_repetition_penalty::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("logits", vocab, dt).output())
             .buffer(BenchBuffer::from_vec(

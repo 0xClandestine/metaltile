@@ -52,8 +52,6 @@ pub mod scan;
 pub mod scatter_axis;
 pub mod sdpa_vector;
 pub mod sgload_smoke;
-pub mod softmax;
-pub mod sort;
 pub mod steel;
 pub mod strided;
 pub mod swiglu;

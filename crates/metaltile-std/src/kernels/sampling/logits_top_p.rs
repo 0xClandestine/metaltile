@@ -42,7 +42,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn logits_top_p_mask<T>(
+pub fn mt_logits_top_p_mask<T>(
     inp: Tensor<T>,
     out: Tensor<T>,
     #[constexpr] n: u32,
@@ -102,7 +102,7 @@ pub fn logits_top_p_mask<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::logits_top_p_mask;
+    use super::mt_logits_top_p_mask;
     use crate::utils::{pack_f32, unpack_f32};
 
     /// Bisection halvings — must match the kernel's loop bound.
@@ -142,7 +142,7 @@ pub mod kernel_tests {
         let logits: Vec<f32> = (0..n * rows).map(|i| (i % 53) as f32 * 0.2 - 5.0).collect();
         let rounded = unpack_f32(&pack_f32(&logits, dt), dt);
         let expected = cpu_top_p_mask(&rounded, n, rows, top_p);
-        TestSetup::new(logits_top_p_mask::kernel_ir_for(dt))
+        TestSetup::new(mt_logits_top_p_mask::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("inp", pack_f32(&logits, dt), dt))
             .input(TestBuffer::zeros("out", n * rows, dt))
@@ -153,17 +153,17 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `logits_top_p_mask` at Qwen3 vocab scale
+/// New-syntax benchmark for `mt_logits_top_p_mask` at Qwen3 vocab scale
 /// (Reduction, one TG per row; 24 bisection passes over the row).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::logits_top_p_mask;
+    use super::mt_logits_top_p_mask;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_top_p_mask(dt: DType) -> BenchSetup {
         let (n, rows) = (152_064usize, 2usize);
-        BenchSetup::new(logits_top_p_mask::kernel_ir_for(dt))
+        BenchSetup::new(mt_logits_top_p_mask::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("inp", n * rows, dt))
             .buffer(BenchBuffer::zeros("out", n * rows, dt).output())

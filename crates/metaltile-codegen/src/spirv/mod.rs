@@ -1057,7 +1057,7 @@ impl GlslGenerator {
                 // step on top of the hardware reciprocal gives correctly-
                 // rounded f32 divide assuming hardware fma is correctly
                 // rounded (true on AMD GFX1xxx V_FMAC_F32). Without this
-                // `test_logits_repetition_penalty` misses bit-exact tol=0
+                // `test_mt_logits_repetition_penalty` misses bit-exact tol=0
                 // by 1 ULP on 2 elements out of 8192.
                 if matches!(bop, BinOpKind::Div) && ty == "float" {
                     writeln!(out, "{pad}{ty} {v} = mt_fdiv({l}, {r});").ok();

@@ -1,6 +1,6 @@
 //! Copyright 2026 0xClandestine, Ekryski, TheTom, Ambisphaeric
 //! SPDX-License-Identifier: Apache-2.0
-//! Quick perf-only timing for `softmax_categorical_sample` at vocab=152K.
+//! Quick perf-only timing for `mt_softmax_categorical_sample` at vocab=152K.
 //!
 //! Ignored by default — run with `--ignored` to measure. Times 1000
 //! sequential dispatches on the same buffers and prints the median +
@@ -19,7 +19,7 @@ use metaltile::{
     Context,
     core::{dtype::DType, ir::KernelMode},
 };
-use metaltile_std::ffai::sampling::softmax_categorical_sample;
+use metaltile_std::kernels::sampling::categorical_sample::mt_softmax_categorical_sample;
 
 #[test]
 #[ignore]
@@ -38,7 +38,7 @@ fn perf_softmax_categorical_sample_vocab_152k() {
     buffers.insert("n".into(), (n as u32).to_le_bytes().to_vec());
 
     let ctx = Context::new().expect("Context::new on macOS");
-    let mut kernel = softmax_categorical_sample::kernel_ir_for(DType::F32);
+    let mut kernel = mt_softmax_categorical_sample::kernel_ir_for(DType::F32);
     kernel.mode = KernelMode::Reduction;
 
     // Warmup.
@@ -58,7 +58,7 @@ fn perf_softmax_categorical_sample_vocab_152k() {
     let median_ns = samples[samples.len() / 2];
     let min_ns = samples[0];
     println!(
-        "softmax_categorical_sample vocab={n}: median={:.1}µs min={:.1}µs",
+        "mt_softmax_categorical_sample vocab={n}: median={:.1}µs min={:.1}µs",
         median_ns as f64 / 1000.0,
         min_ns as f64 / 1000.0,
     );

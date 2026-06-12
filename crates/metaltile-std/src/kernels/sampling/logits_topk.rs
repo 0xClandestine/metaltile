@@ -38,7 +38,7 @@
 use metaltile::kernel;
 
 #[kernel]
-pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshold: f32) {
+pub fn mt_logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshold: f32) {
     let i = program_id::<0>();
     let v = load(inp[i]).cast::<f32>();
     // `select(cond, lhs, rhs)` returns lhs when cond is true.
@@ -51,7 +51,7 @@ pub fn logits_topk_mask<T>(inp: Tensor<T>, out: Tensor<T>, #[constexpr] threshol
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::logits_topk_mask;
+    use super::mt_logits_topk_mask;
     use crate::utils::{pack_f32, unpack_f32};
 
     /// K-th largest value (descending) — how callers pre-compute the cutoff.
@@ -72,7 +72,7 @@ pub mod kernel_tests {
         let threshold = kth_largest(&rounded, k);
         let expected: Vec<f32> =
             rounded.iter().map(|&v| if v >= threshold { v } else { f32::NEG_INFINITY }).collect();
-        TestSetup::new(logits_topk_mask::kernel_ir_for(dt))
+        TestSetup::new(mt_logits_topk_mask::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .input(TestBuffer::from_vec("inp", pack_f32(&logits, dt), dt))
             .input(TestBuffer::zeros("out", n, dt))
@@ -82,17 +82,17 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `logits_topk_mask` at Qwen3 vocab scale
+/// New-syntax benchmark for `mt_logits_topk_mask` at Qwen3 vocab scale
 /// (Grid3D, one thread per vocab position).
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::logits_topk_mask;
+    use super::mt_logits_topk_mask;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_logits_topk_mask(dt: DType) -> BenchSetup {
         let n = 152_064usize;
-        BenchSetup::new(logits_topk_mask::kernel_ir_for(dt))
+        BenchSetup::new(mt_logits_topk_mask::kernel_ir_for(dt))
             .mode(KernelMode::Grid3D)
             .buffer(BenchBuffer::random("inp", n, dt))
             .buffer(BenchBuffer::zeros("out", n, dt).output())

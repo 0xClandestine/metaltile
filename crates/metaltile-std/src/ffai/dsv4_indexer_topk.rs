@@ -14,7 +14,7 @@
 //! shared memory. We do a parallel bitonic sort **descending** over
 //! `(score, original_index)` pairs and emit the first `k` indices.
 //! Same Batcher-pattern compare-and-swap as
-//! [`crate::mlx::sort::mt_sort`] but with parallel storage for an
+//! [`crate::kernels::sampling::sort::mt_sort`] but with parallel storage for an
 //! `u32` index tag so the original cache-position survives the swaps.
 //!
 //! Scores below `n_kv` are padded with `-INFINITY` so the sort

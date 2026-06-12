@@ -322,7 +322,7 @@ fn no_undefined_mt_symbols_in_emitted_msl() {
 #[test]
 fn kernel_annotations_have_matching_inventory_submit() {
     // Collect kernel-named registry entries (kernel_name → matched-via-name)
-    // PLUS kernel_ir function paths (e.g. `softmax_categorical_sample::kernel_ir_for`)
+    // PLUS kernel_ir function paths (e.g. `mt_softmax_categorical_sample::kernel_ir_for`)
     // so we can match either form. The macro expands `#[kernel]` to
     // give each function a `kernel_ir_for(dt) -> Kernel` associated
     // function inside a module of the same name; `inventory::submit!`

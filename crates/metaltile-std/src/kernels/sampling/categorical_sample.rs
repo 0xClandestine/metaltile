@@ -40,7 +40,7 @@ use metaltile::kernel;
 // replaced by 1 × n/lsize chunk-traverse per lane + an 8-stage scan +
 // 1 × n/lsize finalizing walk on the winning lane.
 #[kernel]
-pub fn softmax_categorical_sample<T>(
+pub fn mt_softmax_categorical_sample<T>(
     inp: Tensor<T>,
     out: Tensor<u32>,
     temperature_in: Tensor<f32>,
@@ -136,7 +136,7 @@ pub fn softmax_categorical_sample<T>(
 pub mod kernel_tests {
     use metaltile::{test::*, test_kernel};
 
-    use super::softmax_categorical_sample;
+    use super::mt_softmax_categorical_sample;
     use crate::utils::pack_f32;
 
     #[test_kernel(dtypes = [f32, f16, bf16], tol = 0.5)]
@@ -148,7 +148,7 @@ pub mod kernel_tests {
         let (n, idx, spike) = (1024usize, 813usize, 30.0f32);
         let mut logits = vec![0.0f32; n];
         logits[idx] = spike;
-        TestSetup::new(softmax_categorical_sample::kernel_ir_for(dt))
+        TestSetup::new(mt_softmax_categorical_sample::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .input(TestBuffer::from_vec("inp", pack_f32(&logits, dt), dt))
             .input(TestBuffer::zeros("out", 1, DType::U32))
@@ -160,19 +160,19 @@ pub mod kernel_tests {
     }
 }
 
-/// New-syntax benchmark for `softmax_categorical_sample` at Qwen3 vocab
+/// New-syntax benchmark for `mt_softmax_categorical_sample` at Qwen3 vocab
 /// scale (Reduction, single threadgroup; cooperative max + scan + CDF
 /// walk). Random logits, fixed temperature and uniform draw.
 pub mod kernel_benches {
     use metaltile::{bench, test::*};
 
-    use super::softmax_categorical_sample;
+    use super::mt_softmax_categorical_sample;
     use crate::utils::pack_f32;
 
     #[bench(dtypes = [f32, f16, bf16])]
     fn bench_softmax_categorical_sample(dt: DType) -> BenchSetup {
         let n = 152_064usize;
-        BenchSetup::new(softmax_categorical_sample::kernel_ir_for(dt))
+        BenchSetup::new(mt_softmax_categorical_sample::kernel_ir_for(dt))
             .mode(KernelMode::Reduction)
             .buffer(BenchBuffer::random("inp", n, dt))
             .buffer(BenchBuffer::zeros("out", 1, DType::U32).output())
