@@ -14,6 +14,7 @@ pub mod device;
 pub mod diff;
 pub mod init;
 pub mod inspect;
+pub mod capture;
 pub mod snap;
 pub mod test;
 pub mod update;
